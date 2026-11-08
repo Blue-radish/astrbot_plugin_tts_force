@@ -1,0 +1,94 @@
+﻿{
+  "enable": {
+    "description": "启用插件",
+    "type": "bool",
+    "default": true
+  },
+  "provider_id": {
+    "description": "TTS 提供商 ID（填 cmd_config 里 text_to_speech 类型的 provider id）",
+    "type": "string",
+    "default": "qwen3-tts"
+  },
+  "voice_markers": {
+    "description": "模型用来表示「本条要发语音」的标记，出现即删掉并转语音",
+    "type": "list",
+    "default": [
+      "<语音>",
+      "<语音/>",
+      "【语音】",
+      "[语音]",
+      "#语音",
+      "<voice>",
+      "[voice]"
+    ]
+  },
+  "force_keywords": {
+    "description": "用户消息里出现这些词就强制语音（模型忘写标记时的兜底）",
+    "type": "list",
+    "default": [
+      "发语音",
+      "语音说",
+      "用语音",
+      "念给我听",
+      "语音回",
+      "voice"
+    ]
+  },
+  "strip_patterns": {
+    "description": "合成前删掉的正则（默认删全角/半角括号、方头括号、方括号、*动作*）",
+    "type": "list",
+    "default": [
+      "（[^（）]{0,120}）",
+      "\\([^()]{0,120}\\)",
+      "【[^【】]{0,120}】",
+      "〔[^〔〕]{0,120}〕",
+      "\\[[^\\[\\]]{0,120}\\]",
+      "\\*[^*\\n]{0,120}\\*"
+    ]
+  },
+  "strip_markdown": {
+    "description": "顺带去掉 markdown 符号（# * _ ` > | 与代码块）",
+    "type": "bool",
+    "default": true
+  },
+  "max_chars": {
+    "description": "要念的文本字数上限，超过就发文字（0 = 不限制）",
+    "type": "int",
+    "default": 50
+  },
+  "cooldown": {
+    "description": "两次语音之间最小间隔（秒，0 = 不限制）",
+    "type": "int",
+    "default": 0
+  },
+  "timeout": {
+    "description": "单次合成超时（秒）",
+    "type": "int",
+    "default": 300
+  },
+  "random_rate": {
+    "description": "日常闲聊里有多大比例改用语音（0-100，0 = 关闭随机；模型标记和用户点名不受影响）",
+    "type": "int",
+    "default": 15
+  },
+  "random_min_gap": {
+    "description": "两次「随机」语音之间至少隔多少秒（模型标记/用户点名不受限）",
+    "type": "int",
+    "default": 600
+  },
+  "random_groups": {
+    "description": "允许随机语音的群号（私聊总是允许）；留空就只在私聊随机",
+    "type": "list",
+    "default": []
+  },
+  "inject_prompt": {
+    "description": "往系统提示词里加「什么时候该用语音」，让模型按内容自己判断",
+    "type": "bool",
+    "default": true
+  },
+  "prompt_hint": {
+    "description": "自定义提示词（留空用内置；可用 {marker} 和 {max_chars} 占位）",
+    "type": "string",
+    "default": ""
+  }
+}

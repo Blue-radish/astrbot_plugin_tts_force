@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 测试产物
+.pytest_cache/
+tests/__pycache__/
+
+# 运行期数据（插件数据目录在 AstrBot 那边，这里只是双保险）
+data/
+*.log
+*.wav
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
