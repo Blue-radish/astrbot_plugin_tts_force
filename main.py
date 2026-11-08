@@ -560,12 +560,13 @@ class TTSForcePlugin(Star):
         if not raw_text.strip():
             return
 
-        key = self._pref_key(event)
+        conv = getattr(event, "unified_msg_origin", "") or ""   # 频率/并发按会话算
+        key = self._pref_key(event)                             # 偏好按人算
         user_msg = (event.message_str or "").strip()
         # 幂等：on_llm_request 已经落过一次，这里兜住没走 LLM 请求钩子的情况
         intent = self._apply_intent(key, user_msg)
-        self._turn_seq[key] = self._turn_seq.get(key, 0) + 1
-        my_turn = self._turn_seq[key]
+        self._turn_seq[conv] = self._turn_seq.get(conv, 0) + 1
+        my_turn = self._turn_seq[conv]
 
         text, marked = self._strip_markers(raw_text)
         if marked:
@@ -608,7 +609,7 @@ class TTSForcePlugin(Star):
             if not ok:
                 logger.info(f"[{PLUGIN_NAME}] 本条发文字：{reason}")
                 return
-            ok, reason = self._auto_gap_ok(key, pref_mode)
+            ok, reason = self._auto_gap_ok(conv, pref_mode)
             if not ok:
                 logger.info(f"[{PLUGIN_NAME}] 本条发文字：{reason}")
                 return
@@ -636,10 +637,10 @@ class TTSForcePlugin(Star):
             return
 
         cooldown = self._cfg_int("cooldown", 0)
-        if cooldown > 0 and time.time() - self._last_voice_at.get(key, 0.0) < cooldown:
+        if cooldown > 0 and time.time() - self._last_voice_at.get(conv, 0.0) < cooldown:
             logger.info(f"[{PLUGIN_NAME}] 冷却中，本条发文字")
             return
-        if key in self._busy:
+        if conv in self._busy:
             logger.info(f"[{PLUGIN_NAME}] 上一条语音还在合成，本条发文字")
             return
 
@@ -650,7 +651,7 @@ class TTSForcePlugin(Star):
 
         # 记下此刻的偏好版本与轮次，合成完再复核一次
         ver = self._pref_ver.get(key, 0)
-        self._busy.add(key)
+        self._busy.add(conv)
         try:
             logger.info(
                 f"[{PLUGIN_NAME}] 合成语音（{len(speech)} 字，来源={source}，"
@@ -661,7 +662,7 @@ class TTSForcePlugin(Star):
             if not audio_path:
                 logger.error(f"[{PLUGIN_NAME}] 合成失败，保留文字")
                 return
-            stale = self._stale_reason(key, ver, my_turn, source)
+            stale = self._stale_reason(conv, key, ver, my_turn, source)
             if stale:
                 logger.info(f"[{PLUGIN_NAME}] 丢弃这条语音：{stale}")
                 return
@@ -672,9 +673,9 @@ class TTSForcePlugin(Star):
                 result.chain = keep + [Record(file=audio_path)]
             event.set_result(result)
             now = time.time()
-            self._last_voice_at[key] = now
+            self._last_voice_at[conv] = now
             if source != "对方点名":
-                self._last_auto_at[key] = now
+                self._last_auto_at[conv] = now
             logger.info(f"[{PLUGIN_NAME}] 语音就绪（{now - t0:.1f}s）：{audio_path}")
         except asyncio.TimeoutError:
             logger.warning(
@@ -683,15 +684,15 @@ class TTSForcePlugin(Star):
         except Exception as e:
             logger.error(f"[{PLUGIN_NAME}] 合成异常，保留文字：{e}")
         finally:
-            self._busy.discard(key)
+            self._busy.discard(conv)
 
-    def _stale_reason(self, key: str, ver: int, my_turn: int, source: str = "") -> str:
+    def _stale_reason(self, conv: str, key: str, ver: int, my_turn: int, source: str = "") -> str:
         """合成期间对方改主意或已经继续说话了，这条语音就不该再发。"""
         if self._pref_ver.get(key, 0) != ver:
             return "对方在这期间改了交流偏好"
         if source != "对方点名" and self._pref_mode(key)[0] == "text":
             return "对方现在想用文字"
-        if self._turn_seq.get(key, 0) != my_turn:
+        if self._turn_seq.get(conv, 0) != my_turn:
             return "对方已经继续说下一句了，旧语音不再合适"
         return ""
 

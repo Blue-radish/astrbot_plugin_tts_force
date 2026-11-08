@@ -59,3 +59,14 @@ def test_auto_enable_off_still_honours_explicit_request(tmp_path):
     p, _ = make_plugin(tmp_path, auto_enable=False, max_chars_user=2000)
     voiced, _ = run(p, Event(text="这句念给我听", reply="那就说一句。"))
     assert voiced is True
+
+
+def test_gap_is_shared_by_the_whole_group(tmp_path):
+    """一个人刚发过主动语音，别人也不该紧跟着来一条：频率是会话级的。"""
+    gid = "220001"
+    umo = f"bot_a:GroupMessage:{gid}"
+    p, _ = make_plugin(tmp_path, random_rate=100, auto_min_gap=600, auto_groups=[gid])
+    first, _ = run(p, Event(text="在吗", reply="在的。", gid=gid, umo=umo, sender="111"))
+    second, _ = run(p, Event(text="在吗", reply="在的。", gid=gid, umo=umo, sender="222"))
+    assert first is True
+    assert second is False, "间隔应该按会话共享"
