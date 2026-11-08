@@ -1,14 +1,32 @@
 """共享的测试夹具：加载插件、造假事件/假 provider。"""
 
 import importlib.util
+import os
 import re
 import sys
 from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
-ASTRBOT_ROOT = Path(r"C:\Users\Ray\astrbot")
-for path in (str(PLUGIN_DIR), str(ASTRBOT_ROOT)):
-    if path not in sys.path:
+
+
+def find_astrbot_root() -> Path | None:
+    """找 AstrBot 主程序目录，别在仓库里写死个人路径。
+
+    顺序：环境变量 ASTRBOT_ROOT -> 从本文件往上找含有 astrbot/api 的目录。
+    找不到也没关系，需要宿主的测试会用 importorskip 跳过。
+    """
+    env = os.environ.get("ASTRBOT_ROOT")
+    if env and (Path(env) / "astrbot" / "api").is_dir():
+        return Path(env)
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "astrbot" / "api").is_dir():
+            return parent
+    return None
+
+
+ASTRBOT_ROOT = find_astrbot_root()
+for path in (str(PLUGIN_DIR), str(ASTRBOT_ROOT) if ASTRBOT_ROOT else None):
+    if path and path not in sys.path:
         sys.path.insert(0, path)
 
 
@@ -28,11 +46,14 @@ def make_plugin(tmp_path=None, **attrs):
     p._busy = set()
     p._prefs = {}
     p._prefs_loaded = True
+    p._pref_ver = {}
+    p._turn_seq = {}
     p.context = None
     pats = p._cfg_list("strip_patterns", mod.DEFAULT_STRIP)
     p._strip_res = [re.compile(x) for x in pats]
     if tmp_path is not None:
         p._pref_file = lambda: Path(tmp_path) / "prefs.json"
+        p._state_file = lambda: Path(tmp_path) / "state.json"  # 别写线上 data
     return p, mod
 
 
@@ -81,20 +102,30 @@ class FakeContext:
 class Event:
     """够用的假事件：只实现插件会碰到的方法。"""
 
-    def __init__(self, text="", reply="", gid="", umo="bot_a:FriendMessage:110001"):
+    def __init__(self, text="", reply="", gid="", umo="bot_a:FriendMessage:110001", sender="110001"):
         self.message_str = text
         self.unified_msg_origin = umo
         self._gid = gid
+        self._sender = sender
+        self.sent = []
         self.result = FakeResult(reply)
 
     def get_group_id(self):
         return self._gid
+
+    def get_sender_id(self):
+        return self._sender
 
     def get_result(self):
         return self.result
 
     def set_result(self, result):
         self.result = result
+
+    def plain_result(self, text):
+        """命令返回值：记下来方便断言。"""
+        self.sent.append(text)
+        return text
 
 
 def run(p, event, provider=None):

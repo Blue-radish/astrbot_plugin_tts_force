@@ -15,12 +15,12 @@ def test_marker_with_link_is_not_spoken(tmp_path):
     assert calls == []
 
 
-def test_marker_with_code_only_speaks_the_surrounding_text(tmp_path):
-    """代码块直接删掉不念；剩下的口语部分可以念。"""
+def test_marker_with_code_is_kept_as_text(tmp_path):
+    """带代码的回复不做主动语音：念掉就等于把命令弄丢了。"""
     p, _ = make_plugin(tmp_path, max_chars=200, random_rate=0)
     voiced, calls = run(p, Event(text="晚安", reply="<语音>跑这个 ```npm i``` 就行"))
-    assert voiced is True
-    assert calls and "npm" not in calls[0], "代码不能被念出来"
+    assert voiced is False
+    assert calls == []
 
 
 def test_marker_in_group_outside_whitelist_is_not_spoken(tmp_path):
@@ -73,11 +73,17 @@ def test_meaningless_fragments_are_rejected(speech):
     assert ok is False
 
 
-@pytest.mark.parametrize("speech", ["看这里 https://a.b/c 就行", "```x```", "- 一\n- 二", "The quick brown fox", "订单 2026110800"])
+@pytest.mark.parametrize("speech", ["The quick brown fox jumps", "订单 20261108001234 已发出", "12:30 发车 13:45 到站"])
 def test_noise_is_rejected(speech):
     p, _ = make_plugin()
     ok, _reason = p._voice_worthy(speech)
     assert ok is False
+
+
+@pytest.mark.parametrize("text", ["看这里 https://a.b/c 就行", "```x```", "- 一\n- 二"])
+def test_copyable_content_blocks_auto_voice(text):
+    p, _ = make_plugin()
+    assert p._copyable(text)
 
 
 def test_random_respects_group_whitelist(tmp_path):

@@ -53,7 +53,7 @@ def test_back_to_auto_clears_preference(tmp_path):
     p, _ = make_plugin(tmp_path, text_mode_ttl=600)
     run(p, Event(text="别发语音", reply="好。"))
     assert p._pref_mode(Event().unified_msg_origin)[0] == "text"
-    run(p, Event(text="算了随便你", reply="行。"))
+    run(p, Event(text="语音文字都行", reply="行。"))
     assert p._pref_mode(Event().unified_msg_origin)[0] == "auto"
 
 
