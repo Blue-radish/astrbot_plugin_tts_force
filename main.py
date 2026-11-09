@@ -30,19 +30,33 @@ from astrbot.api.message_components import Plain, Record
 from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "astrbot_plugin_tts_force"
-CONFIG_VERSION = 3  # 配置迁移标记用；改版式时 +1
+CONFIG_VERSION = 4  # 配置迁移标记用；改版式时 +1
 
 DEFAULT_MARKERS = ["<语音>", "<语音/>", "【语音】", "[语音]", "#语音", "<voice>", "[voice]"]
 # 注意：不要放裸的 "voice" —— “voice 这个单词是什么意思”会被它误判成点名
 DEFAULT_FORCE = ["发语音", "发条语音", "发个语音", "语音说", "语音回", "用语音", "念给我听"]
+# 默认只删 *动作*。括号里常常是限定条件（「每天最多一次」「仅限成人」），
+# 删掉就等于把信息吃了；想连括号一起静音，把那条正则加进 strip_patterns 即可。
 DEFAULT_STRIP = [
-    r"（[^（）]{0,120}）",   # 全角括号：动作/神态
-    r"\([^()]{0,120}\)",     # 半角括号
-    r"【[^【】]{0,120}】",   # 方头括号：注释
-    r"〔[^〔〕]{0,120}〕",
-    r"\[[^\[\]]{0,120}\]",   # 方括号
     r"\*[^*\n]{0,120}\*",    # *动作*
 ]
+# 3.x 及更早的默认值：用来认出「从没改过清洗规则」的用户，升级时换成新默认
+LEGACY_DEFAULT_STRIP = [
+    r"（[^（）]{0,120}）",
+    r"\([^()]{0,120}\)",
+    r"【[^【】]{0,120}】",
+    r"〔[^〔〕]{0,120}〕",
+    r"\[[^\[\]]{0,120}\]",
+    r"\*[^*\n]{0,120}\*",
+]
+# 清洗删掉这么多个「有意义的字」就算有损：有损就语音之外保留原文。
+# 只统计 *动作* 以外的规则——星号动作按约定是舞台提示，不算内容。
+LOSS_CHARS = 1
+SELF_TEST_MAX_CHARS = 200
+MAX_CHARS_CEIL = 10000
+TIMEOUT_CEIL = 3600
+GAP_CEIL = 86400
+TTL_CEIL = 7 * 86400
 
 # 拒绝：否定词 + 语音动作词（“别发语音”“不要念了”“别用声音”）
 RE_REFUSE = re.compile(
@@ -75,7 +89,13 @@ RE_IMPERATIVE = re.compile(
 # 长期偏好
 RE_LONG_TERM = re.compile(r"以后|之后|从现在开始|一直|往后|接下来|后面|永久")
 RE_LONG_TEXT_STRICT = re.compile(r"(以后|之后|从现在开始|一直|往后|接下来|后面).{0,6}(文字|打字)")
-RE_LONG_VOICE = re.compile(r"(以后|之后|从现在开始|一直|往后|接下来|后面)(就|都|只)?(用|发|说)?(语音|声音)")
+RE_LONG_VOICE = re.compile(
+    r"(以后|之后|从现在开始|一直|往后|接下来|后面)(就|都|只)?(用|发|说)?(语音|声音)"
+)
+# 只有这几个词算「长期」：「接下来用语音聊」是这一阵，不是永久
+RE_LONG_VOICE_PERMANENT = re.compile(
+    r"(以后|之后|从现在开始|一直|往后|永久)(就|都|只)?(用|发|说)?(语音|声音)"
+)
 RE_VOICE_CHAT = re.compile(r"(用|拿)?语音聊|语音交流|别打字|不想打字")
 # 回到自动：必须指向交流方式，不能是“今晚吃什么随便”
 RE_MODE_AUTO = re.compile(
@@ -97,7 +117,7 @@ DEFAULT_HINT = """[交流方式] 你可以选择这一轮用文字还是用语�
     PLUGIN_NAME,
     "Ray",
     "按对方意愿与会话节奏决定是否语音：拒绝优先、点名一定念、主动语音共享一套约束",
-    "2.3.0",
+    "2.4.0",
 )
 class TTSForcePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -111,6 +131,7 @@ class TTSForcePlugin(Star):
         # 会话偏好版本号 + 轮次号：合成完成前复核用
         self._pref_ver: dict[str, int] = {}
         self._turn_seq: dict[str, int] = {}
+        self._last_test_at: dict[str, float] = {}
         self._hint_logged = False
 
         pats = self._cfg_list("strip_patterns", DEFAULT_STRIP)
@@ -130,11 +151,19 @@ class TTSForcePlugin(Star):
             return v.strip().lower() in ("1", "true", "yes", "on", "是")
         return bool(v)
 
-    def _cfg_int(self, key: str, default: int) -> int:
+    def _cfg_int(
+        self, key: str, default: int, *, lo: int | None = None, hi: int | None = None
+    ) -> int:
+        """读整数并夹在 [lo, hi]：配置里写错数字不该变成没人能解释的行为。"""
         try:
-            return int(self.config.get(key, default))
+            value = int(self.config.get(key, default))
         except (TypeError, ValueError):
-            return default
+            value = default
+        if lo is not None and value < lo:
+            value = lo
+        if hi is not None and value > hi:
+            value = hi
+        return value
 
     def _cfg_str(self, key: str, default: str) -> str:
         v = self.config.get(key, default)
@@ -213,6 +242,12 @@ class TTSForcePlugin(Star):
             self.config["force_keywords"] = [k for k in keywords if k != "voice"]
             moved.append("force_keywords 去掉裸 voice")
 
+        # 3.x 的默认清洗会吞括号内容；没动过清洗规则的人升级后该拿到新默认
+        patterns = self.config.get("strip_patterns")
+        if isinstance(patterns, list) and [str(x) for x in patterns] == LEGACY_DEFAULT_STRIP:
+            self.config["strip_patterns"] = list(DEFAULT_STRIP)
+            moved.append("strip_patterns 换成新默认（不再删括号内容）")
+
         if moved:
             logger.info(f"[{PLUGIN_NAME}] 配置迁移：{'，'.join(moved)}")
             saver = getattr(self.config, "save_config", None)
@@ -221,7 +256,9 @@ class TTSForcePlugin(Star):
                     saver()
                     logger.info(f"[{PLUGIN_NAME}] 配置迁移已保存")
                 except Exception as e:
-                    logger.warning(f"[{PLUGIN_NAME}] 配置迁移保存失败：{e}")
+                    # 没落盘就不能写标记，否则重启后这次的改动凭空消失
+                    logger.warning(f"[{PLUGIN_NAME}] 配置迁移保存失败，下次启动重试：{_short(e)}")
+                    return
         state["config_migrated_v"] = CONFIG_VERSION
         self._write_state(state)
 
@@ -349,7 +386,7 @@ class TTSForcePlugin(Star):
         out = {"force_round": False, "mode": None, "ttl": 0, "why": ""}
         if not msg:
             return out
-        ttl = self._cfg_int("text_mode_ttl", 1800)
+        ttl = self._cfg_int("text_mode_ttl", 1800, lo=1, hi=TTL_CEIL)
 
         # 1) 长期文字：以后都用文字
         if RE_LONG_TEXT_STRICT.search(msg):
@@ -364,9 +401,21 @@ class TTSForcePlugin(Star):
                 why="对方说以后都别发语音" if long_term else "对方明确说别发语音",
             )
             return out
-        # 3) 不方便听：强信号直接生效；场景词要有第一人称、且没被否定
-        if RE_BUSY_STRONG.search(msg):
+        # 3) 不方便听：强信号直接生效（「不需要静音」这种否定不算）；场景词要有第一人称且没被否定
+        busy = RE_BUSY_STRONG.search(msg)
+        if busy and not _negated_before(msg, busy.start()):
             out.update(mode="text", ttl=ttl, why="对方说不方便听")
+            return out
+        # 4) 想把交流方式改成语音：这是「模式」，不是「念这一句」
+        if RE_LONG_VOICE_PERMANENT.search(msg):
+            out.update(mode="voice", ttl=0, why="对方说以后都用语音")
+            return out
+        if RE_LONG_VOICE.search(msg) or RE_VOICE_CHAT.search(msg):
+            out.update(mode="voice", ttl=ttl, why="对方想用语音聊")
+            return out
+        # 5) 明确点名优先于弱场景推断（「我在公司写代码，请用语音解释一下」是要语音）
+        if RE_REQUEST_STRONG.search(msg):
+            out.update(force_round=True, why="对方点名要语音")
             return out
         weak = RE_BUSY_WEAK.search(msg)
         if weak and RE_FIRST_PERSON.search(msg):
@@ -375,23 +424,15 @@ class TTSForcePlugin(Star):
             if not negated:
                 out.update(mode="text", ttl=ttl, why=f"对方说在{weak.group(1)}，不方便听")
                 return out
-        # 4) 想用语音聊（持续）
-        if RE_LONG_VOICE.search(msg) or RE_VOICE_CHAT.search(msg):
-            out.update(mode="voice", ttl=ttl, why="对方想用语音聊")
-            return out
-        # 5) 回到自动：必须指向交流方式
+        # 6) 回到自动：必须指向交流方式
         if RE_MODE_AUTO.search(msg):
             out.update(mode="auto", ttl=0, why="对方说都行")
             return out
-        # 6) 点名 or 咨询：强请求 > 问句 > 弱请求
+        # 7) 点名 or 咨询：问句 > 弱请求
         keywords = self._cfg_list("force_keywords", DEFAULT_FORCE)
-        strong = bool(RE_REQUEST_STRONG.search(msg))
         keyword_hit = any(k in msg for k in keywords)
         consult = bool(RE_CONSULT.search(msg))
         mentions_voice = bool(re.search(r"语音|声音|念|朗读|读出来|voice", msg))
-        if strong:
-            out.update(force_round=True, why="对方点名要语音")
-            return out
         if consult and mentions_voice:
             out.update(why="像是咨询语音功能，不当成点名")
             return out
@@ -456,17 +497,54 @@ class TTSForcePlugin(Star):
 
     # ---------------- 能不能念 ----------------
     @staticmethod
-    def _voice_worthy(speech: str, min_chars: int = 2) -> tuple[bool, str]:
-        """念出来会不会是灾难（作用于清洗后的朗读文本）。"""
+    def _voice_worthy(speech: str, min_chars: int = 2, strict: bool = True) -> tuple[bool, str]:
+        """念出来会不会是灾难（作用于清洗后的朗读文本）。
+
+        strict=False 给「对方明确点名」用：他要听英文就念英文，
+        但仍然拦下纯符号这类根本没法念的东西。
+        """
         meaningful = [ch for ch in speech if ch.isalnum() or _is_cjk(ch)]
         if len(meaningful) < min_chars:
             return False, "没有实际内容（纯符号/语气残留）"
+        if not strict:
+            return True, ""
         ascii_alnum = sum(1 for ch in speech if ch.isascii() and ch.isalnum())
         if ascii_alnum / len(speech) > 0.4:
             return False, "英文数字太多"
         digits = sum(1 for ch in speech if ch.isdigit())
         if digits / len(speech) > 0.3:
             return False, "数字太多"
+        return True, ""
+
+    def _strip_loss(self, text: str) -> int:
+        """清洗规则会删掉多少个「有意义的字」——括号里的限定条件被删时能抓到。
+
+        `*动作*` 不算：那是约定俗成的舞台提示，念不念都不丢信息。
+        """
+        pulled = text
+        for rx in self._strip_res:
+            if rx.pattern.strip().startswith(r"\*"):
+                continue
+            pulled = rx.sub("", pulled)
+        return _meaningful_len(text) - _meaningful_len(pulled)
+
+    @staticmethod
+    def _audio_ok(audio) -> tuple[bool, str]:
+        """合成结果能不能真的当语音发出去（存在、非空、WAV 可解析）。"""
+        try:
+            path = Path(str(audio))
+        except Exception as e:
+            return False, f"返回的不是文件路径（{_short(e)}）"
+        if not path.is_file():
+            return False, f"音频文件不存在：{path.name}"
+        try:
+            size = path.stat().st_size
+        except OSError as e:
+            return False, f"读不到音频文件：{path.name}（{_short(e)}）"
+        if size <= 0:
+            return False, f"音频文件是空的：{path.name}"
+        if path.suffix.lower() == ".wav" and not _wav_ok(path):
+            return False, f"不是可解析的 WAV：{path.name}"
         return True, ""
 
     def _auto_scope_ok(self, event: AstrMessageEvent) -> tuple[bool, str]:
@@ -484,9 +562,9 @@ class TTSForcePlugin(Star):
 
     def _auto_gap_ok(self, key: str, mode: str) -> tuple[bool, str]:
         if mode == "voice":
-            gap = self._cfg_int("voice_mode_min_gap", 25)
+            gap = self._cfg_int("voice_mode_min_gap", 25, lo=0, hi=GAP_CEIL)
         else:
-            gap = self._cfg_int("auto_min_gap", 600)
+            gap = self._cfg_int("auto_min_gap", 600, lo=0, hi=GAP_CEIL)
         if gap <= 0:
             return True, ""
         since = time.time() - self._last_auto_at.get(key, 0.0)
@@ -496,8 +574,8 @@ class TTSForcePlugin(Star):
 
     def _rate_for(self, mode: str) -> int:
         if mode == "voice":
-            return self._cfg_int("voice_mode_rate", 80)
-        return self._cfg_int("random_rate", 15)
+            return self._cfg_int("voice_mode_rate", 80, lo=0, hi=100)
+        return self._cfg_int("random_rate", 15, lo=0, hi=100)
 
     # ---------------- 提示词与偏好记录 ----------------
     def _build_hint(self, pref_mode: str = "auto", pref_why: str = "") -> str:
@@ -514,12 +592,32 @@ class TTSForcePlugin(Star):
             state = ""
         return base + state
 
+    def _turn_of(self, event: AstrMessageEvent, conv: str) -> int:
+        """这条消息属于第几轮。
+
+        轮次必须跟着「消息到达」走：等到回复进入装饰阶段才算的话，
+        对方已经继续说下一句了，旧语音还以为自己是新的（审计复现的窗口）。
+        """
+        try:
+            turn = event.get_extra("tts_turn")
+        except Exception:
+            turn = None
+        if turn is None:
+            turn = self._turn_seq.get(conv, 0) + 1
+            self._turn_seq[conv] = turn
+            try:
+                event.set_extra("tts_turn", turn)
+            except Exception:
+                pass
+        return int(turn)
+
     @filter.on_llm_request()
     async def track_voice_pref(self, event: AstrMessageEvent, req) -> None:
         """在模型生成之前就把对方的交流意愿记下来，本轮提示词才不会拿到上一轮的状态。"""
         if not self._cfg_bool("enable", True):
             return
         self._apply_intent(self._pref_key(event), getattr(event, "message_str", "") or "")
+        self._turn_of(event, getattr(event, "unified_msg_origin", "") or "")
 
     @filter.on_llm_request()
     async def inject_voice_hint(self, event: AstrMessageEvent, req) -> None:
@@ -565,8 +663,7 @@ class TTSForcePlugin(Star):
         user_msg = (event.message_str or "").strip()
         # 幂等：on_llm_request 已经落过一次，这里兜住没走 LLM 请求钩子的情况
         intent = self._apply_intent(key, user_msg)
-        self._turn_seq[conv] = self._turn_seq.get(conv, 0) + 1
-        my_turn = self._turn_seq[conv]
+        my_turn = self._turn_of(event, conv)   # 钩子没跑（比如命令直出）时在这里兜底占一轮
 
         text, marked = self._strip_markers(raw_text)
         if marked:
@@ -581,8 +678,8 @@ class TTSForcePlugin(Star):
 
         if intent["force_round"]:
             source = "对方点名"
-            limit = self._cfg_int("max_chars_user", 2000)
-            timeout = self._cfg_int("timeout", 300)
+            limit = self._cfg_int("max_chars_user", 2000, lo=0, hi=MAX_CHARS_CEIL)
+            timeout = self._cfg_int("timeout", 300, lo=1, hi=TIMEOUT_CEIL)
             dual = bool(copyable)
             if dual:
                 logger.info(
@@ -601,8 +698,8 @@ class TTSForcePlugin(Star):
             if copyable:
                 logger.info(f"[{PLUGIN_NAME}] 本条发文字：回复{copyable}，主动语音跳过")
                 return
-            limit = self._cfg_int("max_chars", 50)
-            timeout = self._cfg_int("auto_timeout", 40)
+            limit = self._cfg_int("max_chars", 50, lo=0, hi=MAX_CHARS_CEIL)
+            timeout = self._cfg_int("auto_timeout", 40, lo=1, hi=TIMEOUT_CEIL)
             source = "模型标记" if marked else "随机"
 
             ok, reason = self._auto_scope_ok(event)
@@ -616,9 +713,18 @@ class TTSForcePlugin(Star):
 
         speech = self._clean_for_speech(text)
         if len(speech) < 1:
-            logger.info(f"[{PLUGIN_NAME}] 去掉括号/标记后没内容了，本条发文字")
+            logger.info(f"[{PLUGIN_NAME}] 清理掉标记/代码后没内容了，本条发文字")
             return
-        ok, reason = self._voice_worthy(speech, 1 if (marked or intent["force_round"]) else 2)
+        if not dual:
+            lost = self._strip_loss(text)
+            if lost >= LOSS_CHARS:
+                dual = True   # 清洗吞掉了实质内容（限定条件等），原文也要留着
+                logger.info(f"[{PLUGIN_NAME}] 清洗会删掉 {lost} 字实质内容，语音之外保留原文")
+        ok, reason = self._voice_worthy(
+            speech,
+            1 if (marked or intent["force_round"]) else 2,
+            strict=not intent["force_round"],
+        )
         if not ok:
             logger.info(f"[{PLUGIN_NAME}] 本条发文字：{reason}")
             return
@@ -636,7 +742,7 @@ class TTSForcePlugin(Star):
             )
             return
 
-        cooldown = self._cfg_int("cooldown", 0)
+        cooldown = self._cfg_int("cooldown", 0, lo=0, hi=GAP_CEIL)
         if cooldown > 0 and time.time() - self._last_voice_at.get(conv, 0.0) < cooldown:
             logger.info(f"[{PLUGIN_NAME}] 冷却中，本条发文字")
             return
@@ -644,15 +750,14 @@ class TTSForcePlugin(Star):
             logger.info(f"[{PLUGIN_NAME}] 上一条语音还在合成，本条发文字")
             return
 
-        provider, pid_desc = await self._resolve_provider(event)
-        if provider is None or not hasattr(provider, "get_audio"):
-            logger.error(f"[{PLUGIN_NAME}] 没拿到可用的 TTS provider：{pid_desc}")
-            return
-
-        # 记下此刻的偏好版本与轮次，合成完再复核一次
-        ver = self._pref_ver.get(key, 0)
+        # 先占住会话再 await：否则两条并发请求都能通过上面的检查，各合成一次
         self._busy.add(conv)
+        ver = self._pref_ver.get(key, 0)   # 合成完要拿这个版本复核
         try:
+            provider, pid_desc = await self._resolve_provider(event)
+            if provider is None or not hasattr(provider, "get_audio"):
+                logger.error(f"[{PLUGIN_NAME}] 没拿到可用的 TTS provider：{pid_desc}")
+                return
             logger.info(
                 f"[{PLUGIN_NAME}] 合成语音（{len(speech)} 字，来源={source}，"
                 f"提供商={pid_desc}，超时 {timeout}s）：{speech[:50]}"
@@ -660,7 +765,11 @@ class TTSForcePlugin(Star):
             t0 = time.time()
             audio_path = await asyncio.wait_for(provider.get_audio(speech), timeout=timeout)
             if not audio_path:
-                logger.error(f"[{PLUGIN_NAME}] 合成失败，保留文字")
+                logger.error(f"[{PLUGIN_NAME}] 合成失败（没返回音频），保留文字")
+                return
+            usable, why_not = self._audio_ok(audio_path)
+            if not usable:
+                logger.error(f"[{PLUGIN_NAME}] 合成结果不能用：{why_not}，保留文字")
                 return
             stale = self._stale_reason(conv, key, ver, my_turn, source)
             if stale:
@@ -682,7 +791,9 @@ class TTSForcePlugin(Star):
                 f"[{PLUGIN_NAME}] 合成超过 {timeout}s（来源={source}），先发文字，避免让对方干等"
             )
         except Exception as e:
-            logger.error(f"[{PLUGIN_NAME}] 合成异常，保留文字：{e}")
+            logger.error(
+                f"[{PLUGIN_NAME}] 合成异常（{_classify_error(e)}），保留文字：{_short(e)}"
+            )
         finally:
             self._busy.discard(conv)
 
@@ -698,32 +809,71 @@ class TTSForcePlugin(Star):
 
     async def _resolve_provider(self, event: AstrMessageEvent) -> tuple[object | None, str]:
         pid = self._cfg_str("provider_id", "")
+        fallback_note = ""
         if pid:
             try:
                 provider = self.context.get_provider_by_id(pid)
             except Exception as e:
-                logger.warning(f"[{PLUGIN_NAME}] get_provider_by_id({pid}) 失败：{e}")
+                logger.warning(f"[{PLUGIN_NAME}] get_provider_by_id({pid}) 失败：{_short(e)}")
                 provider = None
             if provider is not None:
                 return provider, f"{pid}"
             logger.warning(f"[{PLUGIN_NAME}] 配置的提供商 {pid} 不存在，改用当前会话的 TTS")
+            fallback_note = f"配置的 {pid} 不存在，已回退到会话默认"
         try:
             fetcher = self.context.get_using_tts_provider_async
             umo = getattr(event, "unified_msg_origin", "")
-            return await fetcher(umo), f"会话默认（{pid or '未配置'}）"
+            provider = await fetcher(umo)
+            return provider, (fallback_note or f"会话默认（{pid or '未配置'}）")
         except Exception as e:
-            return None, f"按会话取 TTS 失败：{e}"
+            return None, f"按会话取 TTS 失败：{_short(e)}"
 
     # ---------------- 自检命令 ----------------
+    def _self_test_sample(self) -> str:
+        sample = self._cfg_str("test_text", "语音测试成功，这是一句示例。")
+        return sample[:SELF_TEST_MAX_CHARS]
+
+    def _self_test_allowed(self, event: AstrMessageEvent) -> bool:
+        """私聊随便测；群里只给管理员，免得谁都能拿它烧额度。"""
+        try:
+            if not event.get_group_id():
+                return True
+        except Exception:
+            return True
+        try:
+            return bool(event.is_admin())
+        except Exception:
+            return False
+
     @filter.command("语音测试")
     async def tts_self_test(self, event: AstrMessageEvent):
-        """真跑一次合成：报告用的是哪个提供商、耗时、音频时长，或具体失败原因。"""
+        """真跑一次合成，并把音频发回来：能听见才算通。"""
+        if not self._cfg_bool("enable", True):
+            yield event.plain_result("插件已关闭（enable=false），先在配置里启用再测。")
+            return
+        if not self._self_test_allowed(event):
+            yield event.plain_result("这个命令在群里只给管理员用（私聊里谁都可以测）。")
+            return
+
+        conv = getattr(event, "unified_msg_origin", "") or ""
+        cooldown = self._cfg_int("cooldown", 0, lo=0, hi=GAP_CEIL)
+        since = time.time() - self._last_test_at.get(conv, 0.0)
+        if cooldown > 0 and since < cooldown:
+            yield event.plain_result(f"刚测过，{cooldown - since:.0f}s 后再试。")
+            return
+        if conv in self._busy:
+            yield event.plain_result("正在合成别的语音，稍后再测。")
+            return
+
         provider, desc = await self._resolve_provider(event)
         if provider is None or not hasattr(provider, "get_audio"):
             yield event.plain_result(f"❌ 没拿到 TTS 提供商：{desc}")
             return
-        sample = self._cfg_str("test_text", "语音测试成功，这是一句示例。")
-        timeout = self._cfg_int("timeout", 300)
+
+        sample = self._self_test_sample()
+        timeout = self._cfg_int("timeout", 300, lo=1, hi=TIMEOUT_CEIL)
+        self._last_test_at[conv] = time.time()
+        self._busy.add(conv)
         t0 = time.time()
         try:
             audio = await asyncio.wait_for(provider.get_audio(sample), timeout=timeout)
@@ -731,31 +881,78 @@ class TTSForcePlugin(Star):
             yield event.plain_result(f"❌ 合成超时（>{timeout}s），提供商 {desc}")
             return
         except Exception as e:
-            yield event.plain_result(f"❌ 合成失败：{_classify_error(e)}\n提供商 {desc}\n{_short(e)}")
+            yield event.plain_result(
+                f"❌ 合成失败：{_classify_error(e)}\n提供商 {desc}\n{_short(e)}"
+            )
             return
+        finally:
+            self._busy.discard(conv)
+
         elapsed = time.time() - t0
         if not audio:
             yield event.plain_result(f"❌ 提供商没返回音频路径（提供商 {desc}，{elapsed:.1f}s）")
             return
-        path = Path(str(audio))
-        if not path.is_file() or path.stat().st_size == 0:
-            yield event.plain_result(f"❌ 返回的不是可用音频：{path.name}（提供商 {desc}）")
+        usable, why_not = self._audio_ok(audio)
+        if not usable:
+            yield event.plain_result(f"❌ 收到文件但用不了：{why_not}（提供商 {desc}）")
             return
-        yield event.plain_result(
-            f"✅ 合成成功\n提供商：{desc}\n耗时：{elapsed:.1f}s\n"
+        path = Path(str(audio))
+        report = (
+            f"✅ 合成成功（下面这条语音就是试听）\n提供商：{desc}\n耗时：{elapsed:.1f}s\n"
             f"格式：{path.suffix or '未知'}　大小：{path.stat().st_size / 1024:.0f} KB"
             f"{_duration_hint(path)}\n文本：{sample}"
         )
+        yield event.chain_result([Plain(text=report), Record(file=str(path))])
+
+
+def _negated_before(text: str, idx: int) -> bool:
+    """匹配位置前面一小段是不是否定：「不需要静音」「别静音」都不算要求闭嘴。"""
+    head = text[max(0, idx - 4) : idx]
+    return bool(re.search(r"(不|别|没|无|勿|甭|免)\S{0,2}$", head))
+
+
+def _meaningful_len(text: str) -> int:
+    return sum(1 for ch in text if ch.isalnum() or _is_cjk(ch))
+
+
+def _wav_ok(path: Path) -> bool:
+    """扩展名是 wav 就得真能解析，否则宿主发出去也是坏的。"""
+    try:
+        with wave.open(str(path), "rb") as wf:
+            return wf.getnframes() > 0 and wf.getframerate() > 0
+    except Exception:
+        return False
 
 
 def _is_cjk(ch: str) -> bool:
     return "\u4e00" <= ch <= "\u9fff" or "\u3040" <= ch <= "\u30ff"
 
 
+_SECRET_RX = re.compile(
+    r"(?i)("
+    r"sk-[A-Za-z0-9_.\-]{4,}"
+    r"|(?:api[_-]?key|apikey|access[_-]?token|token|authorization|password|passwd|secret|bearer)"
+    r"[\"']?\s*[=:]?\s*[\"']?[A-Za-z0-9_.\-]{4,}"
+    r")"
+)
+
+
+def _redact(text: str) -> str:
+    """把可能的密钥整段抹掉：点号、下划线一起吃，否则会留下 `.def` 这种尾巴。"""
+
+    def _sub(m: re.Match) -> str:
+        token = m.group(1)
+        if token.lower().startswith("sk-"):
+            return "sk-***"
+        head = re.split(r"[=:\s]", token, maxsplit=1)[0]
+        return f"{head}=***"
+
+    return _SECRET_RX.sub(_sub, text)
+
+
 def _short(e: Exception, limit: int = 200) -> str:
-    """错误信息脱敏：别把 key 写进日志或聊天里。"""
-    text = str(e)
-    text = re.sub(r"(?i)(sk-|key|token|authorization)[\w\-:=\s]{0,80}", r"\1***", text)
+    """错误信息脱敏再截断：别把 key 写进日志或聊天里。"""
+    text = re.sub(r"\s+", " ", _redact(str(e))).strip()
     return text[:limit]
 
 

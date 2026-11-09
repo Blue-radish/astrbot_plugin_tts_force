@@ -1,82 +1,124 @@
-﻿{
+{
   "enable": {
     "description": "启用插件",
     "type": "bool",
-    "default": true
+    "default": true,
+    "hint": "关掉后插件完全不介入：不发语音，也不注入提示词。"
   },
   "provider_id": {
-    "description": "语音服务：用哪个 TTS。留空＝跟随当前会话（AstrBot 提供商的 TTS）；也可以从下拉里指定一个 TTS 提供商。密钥和模型在 AstrBot 的「提供商」页面配置",
+    "description": "语音提供商",
     "type": "string",
     "default": "",
-    "_special": "select_provider_tts"
-  },
-  "test_text": {
-    "description": "语音服务：发送 /语音测试 时合成的那句话",
-    "type": "string",
-    "default": "语音测试成功，这是一句示例。"
+    "_special": "select_provider_tts",
+    "obvious_hint": true,
+    "hint": "首次使用：① 先在 AstrBot「提供商」里配好一个 TTS，并关闭宿主自带的自动 TTS；② 这里留空＝跟随当前会话，也可以指定一个；③ 保存后发 /语音测试 试听。API Key、模型、音色都在提供商页面配。"
   },
   "auto_enable": {
-    "description": "语音使用：主动语音总开关（关掉后模型标记和随机都不再发语音，只保留对方点名）",
+    "description": "允许主动语音",
     "type": "bool",
-    "default": true
+    "default": true,
+    "obvious_hint": true,
+    "hint": "关闭后不再主动发语音，但用户明确要求（「念给我听」）照旧会念。"
   },
   "random_rate": {
-    "description": "语音使用：只是「随机分支」的概率（0-100，0 = 关闭随机）。想彻底关掉主动语音用上面的总开关",
+    "description": "随机语音概率（%）",
     "type": "int",
-    "default": 15
-  },
-  "voice_mode_rate": {
-    "description": "语音使用：对方说想用语音聊之后，随机分支的概率",
-    "type": "int",
-    "default": 80
+    "default": 15,
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    },
+    "condition": {
+      "auto_enable": true
+    },
+    "hint": "只影响「随机」这一条路径。设为 0 后，模型标记仍然可以触发语音；想彻底关掉主动语音用上面的开关。"
   },
   "auto_min_gap": {
-    "description": "语音使用：平时两次主动语音之间至少隔多少秒",
+    "description": "主动语音间隔（秒）",
     "type": "int",
-    "default": 600
-  },
-  "voice_mode_min_gap": {
-    "description": "语音使用：对方想用语音聊时，两次主动语音之间的最小间隔（应该明显小于上面那个）",
-    "type": "int",
-    "default": 25
+    "default": 600,
+    "condition": {
+      "auto_enable": true
+    },
+    "hint": "默认 600 秒＝10 分钟。随机语音与模型标记共用这个间隔。"
   },
   "auto_groups": {
-    "description": "语音使用：允许主动语音的群号（私聊总是允许）；留空就只在私聊主动发语音",
+    "description": "允许主动语音的群",
     "type": "list",
-    "default": []
+    "default": [],
+    "condition": {
+      "auto_enable": true
+    },
+    "hint": "只限制主动语音，用户在群里点名要语音仍然会念；频率按整个会话算。填群号（纯数字），留空＝只在私聊主动发语音。"
+  },
+  "voice_mode_rate": {
+    "description": "语音模式概率（%）",
+    "type": "int",
+    "default": 80,
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    },
+    "condition": {
+      "auto_enable": true
+    },
+    "hint": "对方说「用语音聊」之后，随机路径命中的概率。"
+  },
+  "voice_mode_min_gap": {
+    "description": "语音模式间隔（秒）",
+    "type": "int",
+    "default": 25,
+    "condition": {
+      "auto_enable": true
+    },
+    "hint": "语音模式下两次主动语音的最小间隔，应当明显小于上面的普通间隔。"
   },
   "text_mode_ttl": {
-    "description": "用户偏好：对方说「不方便听」「别发语音」后，文字模式持续多少秒（说「以后都用文字」则长期）",
+    "description": "临时偏好有效期（秒）",
     "type": "int",
-    "default": 1800
+    "default": 1800,
+    "hint": "用户说「不方便听」「别发语音」后，文字模式持续多久（默认 1800 秒＝30 分钟）。说「以后都用文字」则长期有效。"
   },
   "max_chars": {
-    "description": "长度与等待：主动语音的字数上限（0 = 不限制）",
+    "description": "主动语音字数上限",
     "type": "int",
-    "default": 50
-  },
-  "max_chars_user": {
-    "description": "长度与等待：对方点名要念时的字数上限",
-    "type": "int",
-    "default": 2000
+    "default": 50,
+    "hint": "要念的文本超过这么多字就改发文字。0＝不限制。"
   },
   "auto_timeout": {
-    "description": "长度与等待：主动语音最多等合成多久（秒），超时就先发文字",
+    "description": "主动语音超时（秒）",
     "type": "int",
-    "default": 40
+    "default": 40,
+    "hint": "等这么久还没合成完就先发文字，避免让对方干等。"
+  },
+  "max_chars_user": {
+    "description": "点名语音字数上限",
+    "type": "int",
+    "default": 2000,
+    "hint": "用户明确要求朗读时允许念更长的内容，默认 2000 字。"
   },
   "timeout": {
-    "description": "长度与等待：对方点名要语音时的合成超时（秒）",
+    "description": "点名语音超时（秒）",
     "type": "int",
-    "default": 300
+    "default": 300,
+    "hint": "点名语音可以多等一会儿，默认 300 秒。"
   },
   "cooldown": {
-    "description": "长度与等待：任意两次语音之间的最小间隔（秒，0 = 不限制）",
+    "description": "额外冷却（秒）",
     "type": "int",
-    "default": 0
+    "default": 0,
+    "hint": "任意两次语音之间的额外最小间隔，0＝不限制。"
+  },
+  "inject_prompt": {
+    "description": "注入交流方式提示",
+    "type": "bool",
+    "default": true,
+    "hint": "往系统提示词里加一段「按对方意愿和节奏选交流方式」。关掉后模型不会主动写语音标记，但随机路径仍可能发语音。"
   },
   "voice_markers": {
-    "description": "高级：模型用来表示「这条用语音」的标记，出现即删掉并转语音",
+    "description": "语音标记",
     "type": "list",
     "default": [
       "<语音>",
@@ -86,10 +128,11 @@
       "#语音",
       "<voice>",
       "[voice]"
-    ]
+    ],
+    "hint": "模型在回复最前面写这些标记表示「这句用语音」。标记会被删掉，然后仍要过主动语音的各种限制（开关、群范围、长度、间隔）。"
   },
   "force_keywords": {
-    "description": "高级：对方消息里出现这些词就算本轮点名要语音（别放太宽的词，比如单独一个 voice）",
+    "description": "额外请求关键词",
     "type": "list",
     "default": [
       "发语音",
@@ -99,34 +142,34 @@
       "语音回",
       "用语音",
       "念给我听"
-    ]
-  },
-  "inject_prompt": {
-    "description": "高级：往系统提示词里加「按对方意愿和节奏选交流方式」，让模型按内容判断",
-    "type": "bool",
-    "default": true
+    ],
+    "hint": "除了内置的「念/读给我听」等规则，再把出现这些词的句子当作点名。别放太宽的词（比如单独一个 voice）。"
   },
   "prompt_hint": {
-    "description": "高级：自定义提示词（留空用内置；可用 {marker} 和 {max_chars} 占位）",
-    "type": "string",
-    "default": ""
+    "description": "自定义提示词",
+    "type": "text",
+    "default": "",
+    "hint": "留空用内置提示词。可用 {marker} 和 {max_chars} 占位。"
   },
   "strip_patterns": {
-    "description": "高级：合成前删掉的正则（默认删全角/半角括号、方头括号、方括号、*动作*）",
+    "description": "清洗正则",
     "type": "list",
     "default": [
-      "（[^（）]{0,120}）",
-      "\\([^()]{0,120}\\)",
-      "【[^【】]{0,120}】",
-      "〔[^〔〕]{0,120}〕",
-      "\\[[^\\[\\]]{0,120}\\]",
       "\\*[^*\\n]{0,120}\\*"
-    ]
+    ],
+    "hint": "合成前删掉的正则。默认只删 *动作*；括号内容默认保留（里面常是限定条件）。想让（…）也不念，把 「（[^（）]{0,120}） 」加进来；无效正则会写进日志并在启动时跳过。"
   },
   "strip_markdown": {
-    "description": "高级：顺带去掉 markdown 符号（# * _ ` > | 与代码块）",
+    "description": "去掉 markdown",
     "type": "bool",
-    "default": true
+    "default": true,
+    "hint": "顺带去掉 # * _ ` > | 与代码块，避免念出符号。"
+  },
+  "test_text": {
+    "description": "自检文本",
+    "type": "string",
+    "default": "语音测试成功，这是一句示例。",
+    "hint": "只在发送 /语音测试 时合成这句话，最多 200 字。"
   },
   "random_min_gap": {
     "description": "（已废弃，改名为 auto_min_gap）",

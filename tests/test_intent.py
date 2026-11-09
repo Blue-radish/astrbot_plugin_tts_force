@@ -142,3 +142,46 @@ def test_bare_voice_is_not_a_keyword_by_default():
     """不能再让 “voice 是什么意思” 这类触发语音。"""
     p, mod = make_plugin()
     assert "voice" not in mod.DEFAULT_FORCE
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "不需要静音，可以正常聊天",
+        "别静音，正常说话就行",
+        "不用静音",
+    ],
+)
+def test_negated_mute_is_not_a_refusal(text):
+    p, _ = make_plugin()
+    assert p._parse_intent(text)["mode"] is None, "否定的「静音」不是要求闭嘴"
+
+
+def test_explicit_request_beats_weak_scene_inference():
+    p, _ = make_plugin()
+    got = p._parse_intent("我在公司写代码，请用语音解释一下")
+    assert got["force_round"] is True, "明确请求优先于「在公司」这种弱推断"
+
+
+def test_weak_scene_alone_still_means_text():
+    p, _ = make_plugin()
+    assert p._parse_intent("我在开会")["mode"] == "text"
+
+
+def test_long_term_voice_is_permanent():
+    p, _ = make_plugin(text_mode_ttl=1800)
+    got = p._parse_intent("以后都用语音")
+    assert got["mode"] == "voice"
+    assert got["ttl"] == 0, "说「以后」就该长期生效，和「以后别发语音」对称"
+
+
+def test_english_explicit_request_can_be_spoken():
+    p, _ = make_plugin()
+    ok, why = p._voice_worthy("This is a normal English sentence for you.", 1, strict=False)
+    assert ok is True, f"对方明确点名时英文也该念，不该被比例规则拦下（{why}）"
+
+
+def test_english_auto_is_still_blocked():
+    p, _ = make_plugin()
+    ok, _ = p._voice_worthy("This is a normal English sentence for you.", 2)
+    assert ok is False, "主动语音遇到英文回复仍然跳过"

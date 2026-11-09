@@ -17,8 +17,14 @@ def test_marker_removed_even_when_not_spoken():
     assert "<语音>" not in "".join(texts(ev.result))
 
 
-def test_parenthetical_actions_are_not_spoken():
+def test_parenthetical_content_is_kept_by_default():
+    """括号里可能是限定条件，默认保留；想删要自己加规则。"""
     p, _ = make_plugin()
+    assert "每天最多一次" in p._clean_for_speech("吃这个（每天最多一次）就好")
+
+
+def test_parenthetical_pattern_can_be_opted_into():
+    p, _ = make_plugin(strip_patterns=[r"（[^（）]{0,120}）"])
     assert "低下头" not in p._clean_for_speech("（她低下头）早点睡吧")
 
 

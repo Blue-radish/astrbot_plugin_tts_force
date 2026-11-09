@@ -80,3 +80,51 @@ def test_real_loader_keeps_legacy_values(tmp_path):
     assert loaded.get("auto_groups") == ["999"]
     assert loaded.get("auto_min_gap") == 23
     assert "voice" not in (loaded.get("force_keywords") or [])
+
+
+def test_failed_save_does_not_mark_migration_done(tmp_path):
+    """配置没落盘就不能写迁移标记，否则重启后那次的改动凭空消失。"""
+    p, _ = make_plugin(tmp_path, random_min_gap=23)
+
+    class Boom(dict):
+        def save_config(self):
+            raise RuntimeError("磁盘写不进去")
+
+    p.config = Boom(p.config)
+    p._migrate_config()
+    assert p.config["auto_min_gap"] == 23
+    assert not (tmp_path / "state.json").exists() or json.loads(
+        (tmp_path / "state.json").read_text(encoding="utf-8")
+    ).get("config_migrated_v", 0) < 3, "保存失败还写标记，重启后会被跳过"
+
+
+def test_successful_save_marks_migration_done(tmp_path):
+    p, _ = make_plugin(tmp_path, random_min_gap=23)
+    saved = {"n": 0}
+
+    class Cfg(dict):
+        def save_config(self):
+            saved["n"] += 1
+
+    p.config = Cfg(p.config)
+    p._migrate_config()
+    assert saved["n"] == 1
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert state["config_migrated_v"] >= 3
+
+
+def test_old_default_strip_patterns_get_replaced(tmp_path):
+    """从没改过清洗规则的用户，升级后不该继续吞括号内容。"""
+    mod = make_plugin()[1]
+    p, _ = make_plugin(tmp_path)
+    p.config["strip_patterns"] = list(mod.LEGACY_DEFAULT_STRIP)
+    p._migrate_config()
+    assert p.config["strip_patterns"] == list(mod.DEFAULT_STRIP)
+    assert "（[^（）]{0,120}）" not in p.config["strip_patterns"]
+
+
+def test_custom_strip_patterns_are_left_alone(tmp_path):
+    p, _ = make_plugin(tmp_path)
+    p.config["strip_patterns"] = [r"【[^【】]*】"]
+    p._migrate_config()
+    assert p.config["strip_patterns"] == [r"【[^【】]*】"], "用户自己写的规则不许动"

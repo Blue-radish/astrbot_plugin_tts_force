@@ -8,7 +8,7 @@ desc: >-
   并且共享一套约束：群白名单、内容检查、最小间隔、字数上限；主动语音合成超过 40 秒就先发文字。
   合成期间对方改主意或已经继续说话，那条旧语音会被丢弃。语音由 AstrBot 的 TTS 提供商合成，
   设置页用选择器挑，`/语音测试` 可真跑一次自检。
-version: 2.3.0
+version: 2.4.0
 author: Ray
 repo: https://github.com/Blue-radish/astrbot_plugin_tts_force
 astrbot_version: ">=4.28.1"
