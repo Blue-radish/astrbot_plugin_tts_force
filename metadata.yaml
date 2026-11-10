@@ -1,5 +1,5 @@
 name: astrbot_plugin_tts_force
-display_name: 说一句就念给你听
+display_name: 念给你听
 short_desc: 模型调用 send_voice 就能把一句话变成语音发出去；插件只负责可靠地合成、校验和发送
 desc: >-
   为模型提供一个 `send_voice(text)` 工具：模型结合人设、上下文和用户当前要求，决定把哪句简短内容
