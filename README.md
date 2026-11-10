@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="说一句就念给你听插件 Logo，紫色双马尾 Q 版角色捧着语音气泡" width="200">
+</p>
+
 # 说一句就念给你听 · astrbot_plugin_tts_force
 
 为 AstrBot 提供 `send_voice(text)` 工具，让模型根据人设、上下文和用户要求，选择用语音表达简短内容。
