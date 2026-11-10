@@ -42,6 +42,29 @@ def test_broken_wav_is_rejected(tmp_path):
     assert "WAV" in why, why
 
 
+def test_header_only_wav_is_rejected(tmp_path):
+    """只有 44 字节头、没有真实音频数据的文件不能算成功。"""
+    from conftest import load_mod
+
+    full = make_wav(tmp_path / "full.wav", seconds=0.3).read_bytes()
+    head = tmp_path / "head.wav"
+    head.write_bytes(full[:44])
+    ok, why = load_mod()._audio_ok(str(head))
+    assert not ok, "只有头部的 WAV 被当成合法音频了"
+    assert "截断" in why or "数据" in why, why
+
+
+def test_half_truncated_wav_is_rejected(tmp_path):
+    from conftest import load_mod
+
+    full = make_wav(tmp_path / "full2.wav", seconds=0.3).read_bytes()
+    half = tmp_path / "half.wav"
+    half.write_bytes(full[: len(full) // 2])
+    ok, why = load_mod()._audio_ok(str(half))
+    assert not ok, "被砍掉一半的 WAV 被当成合法音频了"
+    assert why
+
+
 def test_directory_is_rejected(tmp_path):
     from conftest import load_mod
 

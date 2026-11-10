@@ -24,13 +24,13 @@ def test_blank_provider_follows_the_session(tmp_path):
     assert audio_files(ev)
 
 
-def test_unknown_provider_id_falls_back_and_says_so(tmp_path):
-    """配的提供商不存在时退回会话默认，并在工具结果里说明。"""
+def test_unknown_provider_id_is_a_config_error(tmp_path):
+    """指定了服务却找不到：报错，不许偷偷用另一个服务发出去。"""
     p, _ = make_plugin(provider_id="不存在的服务")
     session = FakeProvider(path=str(tmp_path / "a.wav"))
 
     class Ctx(FakeContext):
-        """按 id 查不到，按会话能拿到。"""
+        """按 id 查不到，按会话能拿到——但这条路径不该被走到。"""
 
         def get_provider_by_id(self, pid):
             self.asked_ids.append(pid)
@@ -39,8 +39,9 @@ def test_unknown_provider_id_falls_back_and_says_so(tmp_path):
     p.context = Ctx(session)
     ev = Event()
     out = call_tool(p, ev)
-    assert audio_files(ev), "回退之后应该还能发"
-    assert "回退" in out, out
+    assert not audio_files(ev), "指定服务不存在却还是发出去了"
+    assert not session.calls, "不该回退到会话默认"
+    assert "不存在" in out or "配置" in out, out
 
 
 def test_missing_provider_is_reported():

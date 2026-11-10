@@ -1,17 +1,11 @@
 {
-  "enable": {
-    "description": "启用插件",
-    "type": "bool",
-    "default": true,
-    "hint": "关掉后模型调用 send_voice 会直接收到「已关闭」的回复，不会合成也不会发语音。"
-  },
   "provider_id": {
     "description": "语音提供商",
     "type": "string",
     "default": "",
     "_special": "select_provider_tts",
     "obvious_hint": true,
-    "hint": "留空＝跟随当前会话的 TTS。首次使用：先在「提供商」页配好一个 TTS，并关闭 AstrBot 自带的 TTS（否则会念两遍），然后私聊发 /语音测试 试听。"
+    "hint": "留空＝跟随当前会话的 TTS；选了就只用选中的那个，它失效时会直接报错而不是偷偷换别的。首次使用：先在「提供商」页配好一个 TTS，并关闭 AstrBot 自带的 TTS（否则会念两遍），然后私聊发 /语音测试 试听。"
   },
   "max_chars": {
     "description": "单次字数上限",
@@ -22,13 +16,18 @@
       "max": 300,
       "step": 10
     },
-    "hint": "超过这个字数的语音请求会被拒绝，并把实际长度和上限回给模型，让它缩短。50 字约 25～30 秒合成（按每字 0.5 秒估）。句子不会被截断。"
+    "hint": "超过这个字数的请求会被拒绝，并把实际长度和上限回给模型让它缩短，句子不会被截断。50 字约 25～30 秒合成（按每字 0.5 秒估）。"
   },
   "timeout": {
     "description": "合成超时（秒）",
     "type": "int",
     "default": 300,
-    "hint": "单次合成的等待上限。超时就把「没发出去」告诉模型，由它决定改用文字还是重试。"
+    "slider": {
+      "min": 5,
+      "max": 600,
+      "step": 5
+    },
+    "hint": "单次合成的等待上限。注意：AstrBot 的工具调用默认只有 120 秒预算（agent_runner 的 tool_call_timeout），设得比它大时实际生效的是宿主的 120 秒，插件自己的超时提示就不会出现——想让长语音真的跑完，把宿主那个值也调大。"
   },
   "test_text": {
     "description": "自检文本",

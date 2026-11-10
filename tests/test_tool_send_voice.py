@@ -86,15 +86,6 @@ def test_empty_text_is_rejected(bad):
     assert out.strip()
 
 
-def test_disabled_plugin_refuses():
-    p, _ = make_plugin(enable=False)
-    prov = FakeProvider()
-    ev = Event()
-    out = call_tool(p, ev, prov)
-    assert not prov.calls
-    assert "关闭" in out or "未启用" in out, out
-
-
 def test_group_chat_is_allowed(tmp_path):
     """私聊群聊都能用，群里不需要管理员。"""
     p, _ = make_plugin()
@@ -154,8 +145,10 @@ def test_concurrent_calls_synthesize_once(tmp_path):
 
 
 def test_timeout_returns_failure(tmp_path):
-    p, _ = make_plugin(timeout=1)
-    prov = FakeProvider(path=str(tmp_path / "a.wav"), delay=1.5)
+    """合成超时要说「超时」，别混成别的失败。这里把预算压到 0.05 秒，测试才跑得快。"""
+    p, _ = make_plugin()
+    p._timeout = lambda: 0.05
+    prov = FakeProvider(path=str(tmp_path / "a.wav"), delay=0.3)
     ev = Event()
     out = call_tool(p, ev, prov)
     assert "超时" in out or "秒" in out, out
@@ -189,6 +182,41 @@ def test_broken_wav_is_reported(tmp_path):
     out = call_tool(p, ev, FakeProvider(path=str(bad), auto_create=False))
     assert not audio_files(ev)
     assert "WAV" in out or "用不了" in out, out
+
+
+def test_send_timeout_is_not_reported_as_synthesis_timeout(tmp_path):
+    """发送阶段超时说的是「结果未确认」，不能说成合成超时——否则模型会以为没发出而重发。"""
+    p, _ = make_plugin()
+    ev = Event()
+
+    async def boom(msg):
+        raise asyncio.TimeoutError()
+
+    ev.send = boom
+    out = call_tool(p, ev, FakeProvider(path=str(tmp_path / "a.wav")))
+    assert "合成超过" not in out, out
+    assert "未确认" in out or "可能" in out, out
+    assert not p._busy
+
+
+def test_cancelled_call_releases_the_slot(tmp_path):
+    """宿主把工具调用掐掉时，会话位不能永久卡住。"""
+    p, _ = make_plugin()
+    prov = FakeProvider(path=str(tmp_path / "a.wav"), delay=5)
+    p.context = FakeContext(prov)
+    ev = Event()
+
+    async def cancel_soon():
+        task = asyncio.create_task(p.tool_send_voice(ev, "会被取消。"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(cancel_soon())
+    assert not p._busy, "取消之后会话位没释放"
 
 
 def test_send_failure_is_reported_not_raised(tmp_path):

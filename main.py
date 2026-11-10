@@ -1,20 +1,20 @@
 """说一句就念给你听 —— 把「这句话用语音说」交给模型，插件只负责可靠地发出去。
 
-设计只有一个入口：模型调用 `send_voice(text)`，插件合成并**直接发送**音频。
+唯一入口：模型调用 `send_voice(text)`，插件合成并作为一条独立消息发出音频。
 
-- 什么时候该念、念多长，由模型结合上下文判断（工具说明负责引导）
-- 插件负责的部分要绝对可靠：长度上限、超时预算、提供商解析、音频校验、
-  同会话不并发合成、失败原因如实回给模型
-- 语音一旦发出去，工具结果会提醒模型「别再用文字重复同一句」
+插件的职责只有一件事：**可靠地发出去或者准确地说清为什么没发**。
+什么时候该念、念多长，由模型结合上下文判断，工具说明负责引导。
 
-没有随机概率、没有语音标记、没有关键词表、没有场景正则、不记忆长期偏好，
-也不改写模型已经生成的回复。模型选表达方式，插件保证发送。
+没有插件内开关（宿主禁用插件就会停用工具）、没有随机、没有标记、没有关键词、
+不记忆偏好、不改写回复；也不清理旧配置（宿主加载配置时已经删掉 schema 之外的键）。
 """
 
 import asyncio
 import re
+import struct
 import time
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 
 from astrbot.api import logger
@@ -24,33 +24,26 @@ from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "astrbot_plugin_tts_force"
 
+# 取值范围与设置页滑块保持一致：界面上拉不到的值，运行时也不生效
+MAX_CHARS_MIN = 10
+MAX_CHARS_MAX = 300
 DEFAULT_MAX_CHARS = 50
+TIMEOUT_MIN = 5
+TIMEOUT_MAX = 600
 DEFAULT_TIMEOUT = 300
-MAX_CHARS_CEIL = 10000
-TIMEOUT_CEIL = 3600
 TEST_TEXT_CEIL = 200
 
-# 3.0 删掉的机制留下的键。升级时连值一起清掉，否则用户会以为它们还有效。
-LEGACY_KEYS = (
-    "random_rate",
-    "random_min_gap",
-    "random_groups",
-    "auto_enable",
-    "auto_min_gap",
-    "auto_groups",
-    "voice_mode_rate",
-    "voice_mode_min_gap",
-    "text_mode_ttl",
-    "max_chars_user",
-    "auto_timeout",
-    "cooldown",
-    "inject_prompt",
-    "prompt_hint",
-    "voice_markers",
-    "force_keywords",
-    "strip_patterns",
-    "strip_markdown",
-)
+
+@dataclass(frozen=True)
+class Spoken:
+    """一次「合成 + 发送」的结果。"""
+
+    ok: bool
+    why: str = ""
+    desc: str = ""
+    seconds: float = 0.0
+    path: str = ""
+    unconfirmed: bool = False   # 发送阶段没拿到结果：可能已经发出去了
 
 
 @register(
@@ -58,17 +51,13 @@ LEGACY_KEYS = (
     "Ray",
     "模型决定这句话用语音说，插件负责合成并可靠地发出去。"
     "闲聊、问候、情绪表达适合简短语音；技术讨论和要复制的内容用文字。",
-    "3.0.0",
+    "3.1.0",
 )
 class TTSForcePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
         self.config = config if config is not None else {}
         self._busy: set[str] = set()   # 同一会话同一时间只合成一条
-        try:
-            self._prune_legacy_config()
-        except Exception as e:
-            logger.warning(f"[{PLUGIN_NAME}] 旧配置清理跳过：{_short(e)}")
 
     # ------------------------------------------------------------------ 配置
     def _cfg_int(
@@ -88,89 +77,125 @@ class TTSForcePlugin(Star):
         value = self.config.get(key, default)
         return str(value) if value is not None else default
 
-    def _cfg_bool(self, key: str, default: bool) -> bool:
-        value = self.config.get(key, default)
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.strip().lower() not in ("false", "0", "no", "off", "")
-        return bool(value)
-
-    def _enable(self) -> bool:
-        return self._cfg_bool("enable", True)
-
     def _max_chars(self) -> int:
-        return self._cfg_int("max_chars", DEFAULT_MAX_CHARS, lo=1, hi=MAX_CHARS_CEIL)
+        return self._cfg_int(
+            "max_chars", DEFAULT_MAX_CHARS, lo=MAX_CHARS_MIN, hi=MAX_CHARS_MAX
+        )
 
     def _timeout(self) -> int:
-        return self._cfg_int("timeout", DEFAULT_TIMEOUT, lo=1, hi=TIMEOUT_CEIL)
+        return self._cfg_int("timeout", DEFAULT_TIMEOUT, lo=TIMEOUT_MIN, hi=TIMEOUT_MAX)
 
     def _test_text(self) -> str:
         return self._cfg_str("test_text", "语音测试成功，这是一句示例。")[:TEST_TEXT_CEIL]
 
-    def _prune_legacy_config(self) -> None:
-        """3.0 删掉的键，从配置文件里也删掉——留着只会让人以为它们还有效。"""
-        removed = [key for key in LEGACY_KEYS if key in self.config]
-        if not removed:
-            return
-        for key in removed:
-            self.config.pop(key, None)
-        logger.info(f"[{PLUGIN_NAME}] 清理已移除的配置项：{'、'.join(removed)}")
-        saver = getattr(self.config, "save_config", None)
-        if not callable(saver):
-            return
-        try:
-            saver()
-            logger.info(f"[{PLUGIN_NAME}] 旧配置已从配置文件删除")
-        except Exception as e:
-            logger.warning(
-                f"[{PLUGIN_NAME}] 旧配置删除后保存失败，下次启动再试：{_short(e)}"
-            )
+    # ------------------------------------------------------------------ 并发
+    def _claim(self, conv: str) -> bool:
+        """占住会话。必须在第一个 await 之前调用，否则并发调用会各合成一次。"""
+        if conv in self._busy:
+            return False
+        self._busy.add(conv)
+        return True
 
     # ------------------------------------------------------------------ 提供商
-    async def _resolve_provider(self, event: AstrMessageEvent) -> tuple[object | None, str]:
-        """配置里指定了就用它；留空或指定错了，就用当前会话的 TTS。"""
+    async def _resolve_provider(
+        self, event: AstrMessageEvent
+    ) -> tuple[object | None, str]:
+        """留空＝跟随会话；指定了就必须用指定的那个，坏了如实报错，不偷偷换成别的。"""
         pid = self._cfg_str("provider_id").strip()
-        fallback_note = ""
         if pid:
             try:
                 provider = self.context.get_provider_by_id(pid)
             except Exception as e:
-                logger.warning(f"[{PLUGIN_NAME}] get_provider_by_id({pid}) 失败：{_short(e)}")
-                provider = None
-            if provider is not None:
-                return provider, pid
-            logger.warning(f"[{PLUGIN_NAME}] 配置的提供商 {pid} 不存在，改用当前会话的 TTS")
-            fallback_note = f"配置的 {pid} 不存在，已回退到会话默认"
+                return None, f"查询配置的语音提供商 {pid} 失败：{_short(e)}"
+            if provider is None:
+                return None, f"配置的语音提供商 {pid} 不存在，请到插件设置里重新选择"
+            if not hasattr(provider, "get_audio"):
+                return None, f"配置的提供商 {pid} 不是 TTS（没有 get_audio）"
+            return provider, pid
+
         try:
             fetcher = self.context.get_using_tts_provider_async
-            umo = getattr(event, "unified_msg_origin", "")
-            provider = await fetcher(umo)
-            return provider, (fallback_note or f"会话默认（{pid or '未指定'}）")
+            provider = await fetcher(getattr(event, "unified_msg_origin", ""))
         except Exception as e:
-            return None, f"按会话取 TTS 失败：{_short(e)}"
+            return None, f"取当前会话的 TTS 失败：{_short(e)}"
+        if provider is None:
+            return None, "当前会话没有配置 TTS 提供商"
+        if not hasattr(provider, "get_audio"):
+            return None, "当前会话的 TTS 提供商不可用（没有 get_audio）"
+        return provider, "会话默认"
+
+    # ------------------------------------------------------------------ 执行
+    async def _speak(self, event: AstrMessageEvent, sentence: str) -> Spoken:
+        """解析提供商 → 合成 → 校验 → 发送。
+
+        超时只罩在合成外面：发送阶段的超时是另一回事（结果未确认），不能混成「合成超时」。
+        调用方必须先用 `_claim()` 占住会话。
+        """
+        provider, desc = await self._resolve_provider(event)
+        if provider is None:
+            return Spoken(False, desc)
+
+        timeout = self._timeout()
+        started = time.monotonic()
+        try:
+            audio = await asyncio.wait_for(provider.get_audio(sentence), timeout=timeout)
+        except asyncio.TimeoutError:
+            return Spoken(
+                False,
+                f"合成超过 {timeout} 秒还没完成（提供商 {desc}）",
+                desc,
+                time.monotonic() - started,
+            )
+        except Exception as e:
+            return Spoken(
+                False,
+                f"合成失败（{_classify_error(e)}）：{_short(e)}（提供商 {desc}）",
+                desc,
+                time.monotonic() - started,
+            )
+        seconds = time.monotonic() - started
+
+        if not audio:
+            return Spoken(False, f"提供商没有返回音频（提供商 {desc}）", desc, seconds)
+        usable, why_not = _audio_ok(audio)
+        if not usable:
+            return Spoken(False, f"合成结果不可用：{why_not}", desc, seconds)
+        path = str(audio)
+
+        try:
+            await event.send(MessageChain([Record(file=path)]))
+        except asyncio.TimeoutError:
+            return Spoken(
+                False,
+                "发送阶段超时",
+                desc,
+                seconds,
+                path,
+                unconfirmed=True,
+            )
+        except Exception as e:
+            return Spoken(
+                False,
+                f"发送失败（{_classify_error(e)}）：{_short(e)}",
+                desc,
+                seconds,
+                path,
+            )
+        return Spoken(True, "", desc, seconds, path)
 
     # ------------------------------------------------------------------ 工具
     @filter.llm_tool(name="send_voice")
     async def tool_send_voice(self, event: AstrMessageEvent, text: str) -> str:
-        """把一段话合成语音，直接发给用户（独立一条消息，用户马上能听见）。
+        """把一段话合成语音发给用户（作为一条独立消息发出）。
 
-        什么时候用：生活闲聊、早晚问候、道谢或道歉、情绪表达、哄人、叫对方早点休息、
-        一句短回应——这些内容听起来比读起来舒服。可以先用文字说一句，再调用本工具补一段语音。
-
-        什么时候不用：技术讨论、长篇解释、代码、命令、路径、链接、清单、数字，
-        以及任何需要用户复制或回看的内容，一律用文字。
-
-        用户明确要求时（「念给我听」「用语音说」「语音回我」）一定要调用本工具。
-        一次只发一句：口语、自然，不要带 markdown、表情符号、代码或括号里的动作说明。
-        超过字数上限会被拒绝，那时缩短再调用一次，不要分段连发。
+        - 适合发语音：口语化、简短的句子——闲聊、问候、情绪表达、道谢道歉、哄人。
+        - 适合文字：技术长文、代码、命令、路径、链接、需要复制回看的内容。
+        - 用户要求时（「念给我听」「用语音说」「语音回我」）一定要调用；先用文字说一句再调用也可以。
+        - 太长会被拒绝，按返回的长度提示缩短后再调用，不要分段连发。
 
         Args:
-            text(string): 要念出来的话，纯口语句子，不含 markdown、表情、代码和括号动作说明
+            text(string): 要念出来的话；口语，不含 markdown、表情符号、代码和括号动作说明
         """
-        if not self._enable():
-            return "语音功能已关闭（配置里 enable=false），这次没有发送。请直接用文字回复。"
-
         sentence = (text or "").strip()
         if not sentence:
             return "text 是空的，没有可念的内容。请直接用文字回复。"
@@ -183,53 +208,30 @@ class TTSForcePlugin(Star):
             )
 
         conv = getattr(event, "unified_msg_origin", "") or ""
-        if conv in self._busy:
+        if not self._claim(conv):
             return "上一条语音还在合成，这条没有发出。稍等再调用一次，或者先用文字回复。"
-
-        # 先占位再 await：否则两条并发调用都能通过上面的检查，各合成一次
-        self._busy.add(conv)
-        timeout = self._timeout()
-        t0 = time.time()
         try:
-            provider, desc = await self._resolve_provider(event)
-            if provider is None or not hasattr(provider, "get_audio"):
-                return f"没拿到可用的语音提供商：{desc}。请改用文字回复。"
-
-            logger.info(
-                f"[{PLUGIN_NAME}] 合成语音（{len(sentence)} 字，提供商={desc}，"
-                f"超时 {timeout}s）：{sentence[:40]}"
-            )
-            audio = await asyncio.wait_for(provider.get_audio(sentence), timeout=timeout)
-            if not audio:
-                return "提供商没有返回音频。请改用文字回复。"
-
-            usable, why_not = _audio_ok(audio)
-            if not usable:
-                logger.error(f"[{PLUGIN_NAME}] 合成结果不能用：{why_not}")
-                return f"合成结果是不可用的音频（{why_not}），没有发送。请改用文字回复。"
-
-            await event.send(MessageChain([Record(file=str(audio))]))
-            logger.info(f"[{PLUGIN_NAME}] 语音已发送（{time.time() - t0:.1f}s）：{audio}")
-            # 配置错了不该只在日志里：顺带告诉模型，它可以提醒用户去检查
-            note = f"（另外：{desc}，可以提醒用户检查语音提供商配置。）" if "已回退" in desc else ""
-            return (
-                "语音已经发给用户了（这是一条独立消息，用户能听见这句话）。"
-                "不要把同一句话再用文字重复一遍；如果还有别的信息要补充，用文字说新的内容。"
-                + note
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"[{PLUGIN_NAME}] 合成超过 {timeout}s，这条语音没发出去")
-            return (
-                f"合成超过 {timeout} 秒还没完成，这条语音没有发送。"
-                "可以改用文字回复，或者把句子缩短后再试。"
-            )
-        except Exception as e:
-            logger.error(
-                f"[{PLUGIN_NAME}] 合成/发送失败（{_classify_error(e)}）：{_short(e)}"
-            )
-            return f"语音没有发出去（{_classify_error(e)}）：{_short(e)}。请改用文字回复。"
+            spoken = await self._speak(event, sentence)
         finally:
             self._busy.discard(conv)
+
+        if spoken.ok:
+            logger.info(
+                f"[{PLUGIN_NAME}] 语音已发送（{spoken.seconds:.1f}s，"
+                f"提供商={spoken.desc}）：{sentence[:40]}"
+            )
+            return (
+                "语音已经作为一条独立消息发给用户了。"
+                "不要把同一句话再用文字重复一遍；如果还有别的信息要补充，用文字说新的内容。"
+            )
+
+        logger.error(f"[{PLUGIN_NAME}] 语音没发出去（提供商={spoken.desc}）：{spoken.why}")
+        if spoken.unconfirmed:
+            return (
+                f"语音发送结果未确认（{spoken.why}），可能已经发出去了。"
+                "不要重复调用本工具；如果用户说没收到，再用文字回复。"
+            )
+        return f"语音没有发出去：{spoken.why}。请改用文字回复。"
 
     # ------------------------------------------------------------------ 自检
     def _self_test_allowed(self, event: AstrMessageEvent) -> bool:
@@ -247,84 +249,63 @@ class TTSForcePlugin(Star):
     @filter.command("语音测试")
     async def tts_self_test(self, event: AstrMessageEvent):
         """不经模型，直接把一句固定话合成发给你：分清是 TTS 坏了还是模型没调用工具。"""
-        if not self._enable():
-            yield event.plain_result("插件已关闭（enable=false），先在配置里启用再测。")
-            return
         if not self._self_test_allowed(event):
             yield event.plain_result("这个命令在群里只给管理员用（私聊里谁都可以测）。")
             return
 
         conv = getattr(event, "unified_msg_origin", "") or ""
-        if conv in self._busy:
+        if not self._claim(conv):
             yield event.plain_result("正在合成别的语音，稍后再测。")
             return
 
-        provider, desc = await self._resolve_provider(event)
-        if provider is None or not hasattr(provider, "get_audio"):
-            yield event.plain_result(f"❌ 没拿到语音提供商：{desc}")
-            return
-
         sample = self._test_text()
-        timeout = self._timeout()
-        self._busy.add(conv)
-        t0 = time.time()
         try:
-            audio = await asyncio.wait_for(provider.get_audio(sample), timeout=timeout)
-        except asyncio.TimeoutError:
-            yield event.plain_result(f"❌ 合成超时（>{timeout}s），提供商 {desc}")
-            return
-        except Exception as e:
-            yield event.plain_result(
-                f"❌ 合成失败：{_classify_error(e)}\n提供商 {desc}\n{_short(e)}"
-            )
-            return
+            spoken = await self._speak(event, sample)
         finally:
             self._busy.discard(conv)
 
-        elapsed = time.time() - t0
-        if not audio:
-            yield event.plain_result(f"❌ 提供商没返回音频（提供商 {desc}，{elapsed:.1f}s）")
-            return
-        usable, why_not = _audio_ok(audio)
-        if not usable:
-            yield event.plain_result(f"❌ 收到文件但用不了：{why_not}（提供商 {desc}）")
+        if not spoken.ok:
+            yield event.plain_result(f"❌ {spoken.why}")
             return
 
-        path = Path(str(audio))
+        path = Path(spoken.path)
         try:
-            await event.send(MessageChain([Record(file=str(path))]))
-        except Exception as e:
-            yield event.plain_result(f"❌ 合成成功但发送失败：{_short(e)}")
-            return
-
+            size_text = f"{path.stat().st_size / 1024:.0f} KB"
+        except OSError:
+            size_text = "未知"
         yield event.plain_result(
-            f"✅ 合成成功（下面这条语音就是试听）\n提供商：{desc}\n耗时：{elapsed:.1f}s\n"
-            f"格式：{path.suffix or '未知'}　大小：{path.stat().st_size / 1024:.0f} KB"
+            f"✅ 合成成功（上面那条语音就是试听）\n提供商：{spoken.desc}\n"
+            f"耗时：{spoken.seconds:.1f}s\n格式：{path.suffix or '未知'}　大小：{size_text}"
             f"{_duration_hint(path)}\n文本：{sample}"
         )
 
 
 # ---------------------------------------------------------------------- 工具函数
-_SECRET_RX = re.compile(
-    r"(?i)("
-    r"sk-[A-Za-z0-9_.\-]{4,}"
-    r"|(?:api[_-]?key|apikey|access[_-]?token|token|authorization|password|passwd|secret|bearer)"
-    r"[\"']?\s*[=:]?\s*[\"']?[A-Za-z0-9_.\-]{4,}"
-    r")"
+_SECRET_KEYS = (
+    r"api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|token"
+    r"|authorization|password|passwd|secret|bearer|密码|令牌|密钥"
 )
+
+# 键名 + 分隔符（可带引号）+ 可选的 Bearer/Basic + 值。
+# 值允许 + / = 这类 base64 字符；引号与空白都算值的边界。
+_SECRET_RX = re.compile(
+    rf"(?i)(?P<key>{_SECRET_KEYS})"
+    r"(?P<sep>\s*(?:[:=：]|是|为)?\s*[\"']?)"
+    r"(?P<scheme>(?:bearer|basic)\s+)?"
+    r"(?P<val>[A-Za-z0-9._~+/=\-]{4,})"
+    r"(?P<tail>[\x22\x27]?)"
+)
+_BARE_SK_RX = re.compile(r"(?i)\bsk-[A-Za-z0-9_.\-]{4,}")
 
 
 def _redact(text: str) -> str:
-    """把可能的密钥整段抹掉：点号、下划线一起吃，否则会留下 `.def` 这种尾巴。"""
+    """把凭据整段抹掉（统一的脱敏入口）。
 
-    def _sub(m: re.Match) -> str:
-        token = m.group(1)
-        if token.lower().startswith("sk-"):
-            return "sk-***"
-        head = re.split(r"[=:\s]", token, maxsplit=1)[0]
-        return f"{head}=***"
-
-    return _SECRET_RX.sub(_sub, text)
+    Authorization 头、带引号的值、带 + / = 的 base64 密钥、中文的「密码是」都在这里处理；
+    `sk-` 开头的裸密钥单独兜一层。
+    """
+    masked = _SECRET_RX.sub(lambda m: f"{m.group('key')}=***", text)
+    return _BARE_SK_RX.sub("sk-***", masked)
 
 
 def _short(e: Exception, limit: int = 200) -> str:
@@ -346,8 +327,42 @@ def _classify_error(e: Exception) -> str:
     return "其他错误"
 
 
+def _wav_ok(path: Path) -> tuple[bool, str]:
+    """按 RIFF 块走一遍，确认 data 块真的带着它声称的字节数。
+
+    `wave.getnframes()` 读的是头部声明，砍掉一半的文件照样「合法」——所以看实际长度。
+    """
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            head = fh.read(12)
+            if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+                return False, f"不是 RIFF/WAVE 头：{path.name}"
+            pos = 12
+            while pos + 8 <= size:
+                fh.seek(pos)
+                meta = fh.read(8)
+                if len(meta) < 8:
+                    break
+                chunk_id, chunk_size = struct.unpack("<4sI", meta)
+                body = pos + 8
+                if chunk_id == b"data":
+                    if chunk_size <= 0:
+                        return False, f"音频数据块是空的：{path.name}"
+                    if body + chunk_size > size:
+                        return False, (
+                            f"音频数据被截断：{path.name} 声明 {chunk_size} 字节，"
+                            f"实际只有 {max(size - body, 0)} 字节"
+                        )
+                    return True, ""
+                pos = body + chunk_size + (chunk_size & 1)   # RIFF 块按偶数字节对齐
+            return False, f"没找到音频数据块：{path.name}"
+    except Exception as e:
+        return False, f"读取 WAV 失败：{path.name}（{_short(e)}）"
+
+
 def _audio_ok(audio) -> tuple[bool, str]:
-    """合成结果能不能真的当语音发出去（存在、非空、wav 可解析）。"""
+    """合成结果能不能真的当语音发出去（存在、非空、wav 的头与数据都对得上）。"""
     if not audio:
         return False, "没有返回音频路径"
     try:
@@ -363,12 +378,7 @@ def _audio_ok(audio) -> tuple[bool, str]:
     if size <= 0:
         return False, f"音频文件是空的：{path.name}"
     if path.suffix.lower() == ".wav":
-        try:
-            with wave.open(str(path), "rb") as wf:
-                if wf.getnframes() <= 0 or wf.getframerate() <= 0:
-                    return False, f"WAV 里没有音频帧：{path.name}"
-        except Exception:
-            return False, f"不是可解析的 WAV：{path.name}"
+        return _wav_ok(path)
     return True, ""
 
 

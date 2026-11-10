@@ -9,7 +9,7 @@ desc: >-
   实际长度，不截断句子）、合成超时、提供商解析与回退说明、音频文件校验（不存在/空/坏 WAV
   都不发）、同会话不并发合成、失败原因脱敏后回给模型。私聊群聊都能用。
   `/语音测试` 可绕开模型直接合成一句，用来分清是 TTS 服务坏了还是模型没调用工具。
-version: 3.0.0
+version: 3.1.0
 author: Ray
 repo: https://github.com/Blue-radish/astrbot_plugin_tts_force
 astrbot_version: ">=4.28.1"

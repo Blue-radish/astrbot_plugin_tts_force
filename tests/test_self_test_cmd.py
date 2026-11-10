@@ -47,14 +47,6 @@ def test_invalid_audio_is_reported_as_failure(tmp_path):
     assert not audio_files(ev), "坏音频不该发出去"
 
 
-def test_disabled_plugin_refuses(tmp_path):
-    p, _ = make_plugin(enable=False)
-    ev = Event()
-    out = run_cmd(p, ev, FakeProvider(path=str(make_wav(tmp_path / "ok.wav"))))
-    assert "关闭" in str(out[0]) or "未启用" in str(out[0]), out
-    assert not audio_files(ev)
-
-
 def test_group_member_without_admin_is_refused(tmp_path):
     p, _ = make_plugin()
     ev = Event(gid="220001", admin=False)
@@ -83,6 +75,34 @@ def test_busy_conversation_refuses(tmp_path):
 def test_test_text_is_truncated(tmp_path):
     p, _ = make_plugin(test_text="啊" * 500)
     assert len(p._test_text()) <= 200
+
+
+def test_self_test_and_tool_do_not_synthesize_twice(tmp_path):
+    """自检和工具共用一套占位/释放：并发时只合成一次。"""
+    import conftest
+
+    p, _ = make_plugin()
+    prov = FakeProvider(path=str(make_wav(tmp_path / "ok.wav")), delay=0.05)
+    p.context = conftest.FakeContext(prov)
+
+    # 解析提供商慢一点，才能造出「自检已进入流程、工具又进来」的窗口
+    original = p._resolve_provider
+
+    async def slow(ev):
+        await asyncio.sleep(0.02)
+        return await original(ev)
+
+    p._resolve_provider = slow
+
+    async def both():
+        async def as_cmd():
+            return [m async for m in p.tts_self_test(Event())]
+
+        return await asyncio.gather(as_cmd(), p.tool_send_voice(Event(), "同时来一条。"))
+
+    asyncio.run(both())
+    assert len(prov.calls) == 1, prov.calls
+    assert not p._busy
 
 
 def test_missing_provider_is_reported():
