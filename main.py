@@ -51,7 +51,7 @@ class Spoken:
     "Ray",
     "模型决定这句话用语音说，插件负责合成并可靠地发出去。"
     "闲聊、问候、情绪表达适合简短语音；技术讨论和要复制的内容用文字。",
-    "3.2.0",
+    "3.3.0",
 )
 class TTSForcePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -186,19 +186,26 @@ class TTSForcePlugin(Star):
     # ------------------------------------------------------------------ 工具
     @filter.llm_tool(name="send_voice")
     async def tool_send_voice(self, event: AstrMessageEvent, text: str) -> str:
-        """把一段话合成语音发给用户（作为一条独立消息发出）。
+        """将文本合成为语音，并作为一条独立消息发送到当前会话。
 
-        - 适合发语音：口语化、简短的句子——闲聊、问候、情绪表达、道谢道歉、哄人。
-        - 适合文字：技术长文、代码、命令、路径、链接、需要复制回看的内容。
-        - 用户要求时（「念给我听」「用语音说」「语音回我」）一定要调用；先用文字说一句再调用也可以。
-        - 太长会被拒绝，按返回的长度提示缩短后再调用，不要分段连发。
+        结合用户当前要求、人设和上下文决定是否调用。
+        生活闲聊、早晚问候、道谢和情绪表达适合简短语音；
+        技术长文、代码、命令、路径、链接，以及需要复制或反复查看的信息优先用文字。
+        用户明确要求语音时优先满足，仍需遵守长度限制。
+
+        可以先发送其他文字，再用语音补充一句。准备通过语音说出的内容，
+        不要提前用文字重复一遍；调用成功后也无需再用文字复述相同内容。
+
+        调用会立即尝试发送，返回值是发送状态。超出长度上限时会给出实际长度，
+        可缩短后重试，避免分段连续发送。其他失败由你结合原因决定后续回复；
+        如果返回「发送结果未确认」，不要立即重试，以免重复发送。
 
         Args:
-            text(string): 要念出来的话；口语，不含 markdown、表情符号、代码和括号动作说明
+            text(string): 实际要朗读的简短文本，用自然口语，避免 Markdown、表情符号、代码和动作描写。
         """
         sentence = (text or "").strip()
         if not sentence:
-            return "text 是空的，没有可念的内容。请直接用文字回复。"
+            return "text 是空的，没有可念的内容，所以没有发送。用文字回复或重新准备一句都可以。"
 
         limit = self._max_chars()
         if len(sentence) > limit:
@@ -209,7 +216,7 @@ class TTSForcePlugin(Star):
 
         conv = getattr(event, "unified_msg_origin", "") or ""
         if not self._claim(conv):
-            return "上一条语音还在合成，这条没有发出。稍等再调用一次，或者先用文字回复。"
+            return "上一条语音还在合成，这条没有发出。可以稍等再调用一次，也可以先用文字回复。"
         try:
             spoken = await self._speak(event, sentence)
         finally:
@@ -231,7 +238,7 @@ class TTSForcePlugin(Star):
                 f"语音发送结果未确认（{spoken.why}），可能已经发出去了。"
                 "不要重复调用本工具；如果用户说没收到，再用文字回复。"
             )
-        return f"语音没有发出去：{spoken.why}。请改用文字回复。"
+        return f"语音没有发出去：{spoken.why}。可以根据这个原因决定接下来用文字回复还是做其他处理。"
 
     # ------------------------------------------------------------------ 自检
     def _self_test_allowed(self, event: AstrMessageEvent) -> bool:

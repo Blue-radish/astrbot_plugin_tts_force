@@ -17,7 +17,8 @@ def find_astrbot_root() -> Path | None:
     """找 AstrBot 主程序目录，别在仓库里写死个人路径。
 
     顺序：环境变量 ASTRBOT_ROOT -> 从本文件往上找含有 astrbot/api 的目录。
-    找不到也没关系，需要宿主的测试会用 importorskip 跳过。
+    插件要靠 `astrbot.api` 注册工具，所以整套测试都需要能导入 AstrBot；
+    找不到时下面的导入检查会直接报出原因，不会静默跳过。
     """
     env = os.environ.get("ASTRBOT_ROOT")
     if env and (Path(env) / "astrbot" / "api").is_dir():
@@ -32,6 +33,16 @@ ASTRBOT_ROOT = find_astrbot_root()
 for path in (str(PLUGIN_DIR), str(ASTRBOT_ROOT) if ASTRBOT_ROOT else None):
     if path and path not in sys.path:
         sys.path.insert(0, path)
+
+try:
+    import astrbot.api  # noqa: F401
+except ImportError as exc:  # 缺宿主时给出能直接照做的一句话，而不是一堆 ImportError
+    raise RuntimeError(
+        "测试需要能导入 AstrBot 本体（插件通过 astrbot.api 注册工具）。"
+        "用 AstrBot 自己的虚拟环境运行，例如 <AstrBot>\\.venv\\Scripts\\python.exe -m pytest tests -q；"
+        "或者把环境变量 ASTRBOT_ROOT 指向 AstrBot 主程序目录。"
+        f"当前 ASTRBOT_ROOT = {ASTRBOT_ROOT!r}；导入失败原因：{exc}"
+    ) from exc
 
 
 def load_mod():
