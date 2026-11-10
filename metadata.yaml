@@ -10,7 +10,7 @@ desc: >-
   都不发）、同会话不并发合成（工具与 `/语音测试` 共用一条流程）、失败原因脱敏后回给模型。
   指定的提供商失效会直接报配置错误，不会偷偷换别的服务。私聊群聊都能用。
   `/语音测试` 可绕开模型直接合成一句，用来分清是 TTS 服务坏了还是模型没调用工具。
-version: 3.1.0
+version: 3.2.0
 author: Ray
 repo: https://github.com/Blue-radish/astrbot_plugin_tts_force
 astrbot_version: ">=4.28.1"

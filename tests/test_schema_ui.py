@@ -61,8 +61,8 @@ def test_every_visible_field_has_a_hint():
 
 def test_defaults_in_schema_match_the_code():
     s = schema()
-    assert s["max_chars"]["default"] == 50
-    assert s["timeout"]["default"] == 300
+    assert s["max_chars"]["default"] == 30
+    assert s["timeout"]["default"] == 120
     assert s["provider_id"]["default"] == ""
 
 

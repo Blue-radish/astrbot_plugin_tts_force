@@ -24,13 +24,13 @@ from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "astrbot_plugin_tts_force"
 
-# 取值范围与设置页滑块保持一致：界面上拉不到的值，运行时也不生效
+# 设置页直接填数字；这里只是防止手改配置文件写出离谱值时的兜底边界
 MAX_CHARS_MIN = 10
 MAX_CHARS_MAX = 300
-DEFAULT_MAX_CHARS = 50
+DEFAULT_MAX_CHARS = 30
 TIMEOUT_MIN = 5
 TIMEOUT_MAX = 600
-DEFAULT_TIMEOUT = 300
+DEFAULT_TIMEOUT = 120   # 宿主工具调用默认 120 秒预算，插件不能等得比它久
 TEST_TEXT_CEIL = 200
 
 
@@ -51,7 +51,7 @@ class Spoken:
     "Ray",
     "模型决定这句话用语音说，插件负责合成并可靠地发出去。"
     "闲聊、问候、情绪表达适合简短语音；技术讨论和要复制的内容用文字。",
-    "3.1.0",
+    "3.2.0",
 )
 class TTSForcePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
