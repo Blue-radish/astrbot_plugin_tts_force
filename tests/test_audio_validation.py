@@ -1,64 +1,71 @@
-"""合成结果要真的能用（存在、非空、WAV 可解析），否则保留文字。"""
+"""合成结果能不能真的当语音发出去：存在、非空、wav 能解析。"""
 
-import asyncio
-import wave
-
-from conftest import Event, FakeProvider, FakeContext, make_plugin, texts
+from conftest import make_wav
 
 
-def _make_wav(path, seconds=0.2):
-    with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(8000)
-        wf.writeframes(b"\x00\x00" * int(8000 * seconds))
+def test_valid_wav_passes(tmp_path):
+    from conftest import load_mod
+
+    mod = load_mod()
+    ok, why = mod._audio_ok(str(make_wav(tmp_path / "a.wav")))
+    assert ok, why
 
 
-def _voiced(result):
-    from astrbot.api.message_components import Record
+def test_missing_file_is_rejected(tmp_path):
+    from conftest import load_mod
 
-    return any(isinstance(c, Record) for c in result.chain)
-
-
-def test_missing_audio_file_keeps_text(tmp_path):
-    p, _ = make_plugin(tmp_path, max_chars_user=2000)
-    p.context = FakeContext(
-        FakeProvider(path=str(tmp_path / "没有这个文件.wav"), auto_create=False)
-    )
-    ev = Event(text="念给我听", reply="早点睡吧。")
-    asyncio.run(p.maybe_tts(ev))
-    assert not _voiced(ev.result), "文件不存在就不该换成语音"
-    assert "早点睡吧。" in "".join(texts(ev.result))
+    mod = load_mod()
+    ok, why = mod._audio_ok(str(tmp_path / "nope.wav"))
+    assert not ok
+    assert "不存在" in why, why
 
 
-def test_empty_audio_file_keeps_text(tmp_path):
-    p, _ = make_plugin(tmp_path, max_chars_user=2000)
+def test_empty_file_is_rejected(tmp_path):
+    from conftest import load_mod
+
+    mod = load_mod()
     empty = tmp_path / "empty.wav"
     empty.write_bytes(b"")
-    p.context = FakeContext(FakeProvider(path=str(empty)))
-    ev = Event(text="念给我听", reply="早点睡吧。")
-    asyncio.run(p.maybe_tts(ev))
-    assert not _voiced(ev.result)
-    assert "早点睡吧。" in "".join(texts(ev.result))
+    ok, why = mod._audio_ok(str(empty))
+    assert not ok
+    assert "空" in why, why
 
 
-def test_broken_wav_keeps_text(tmp_path):
-    """扩展名是 wav 但内容不是音频：宿主发不出去，别把文字换掉。"""
-    p, _ = make_plugin(tmp_path, max_chars_user=2000)
-    broken = tmp_path / "broken.wav"
-    broken.write_bytes(b"not audio at all" * 20)
-    p.context = FakeContext(FakeProvider(path=str(broken)))
-    ev = Event(text="念给我听", reply="早点睡吧。")
-    asyncio.run(p.maybe_tts(ev))
-    assert not _voiced(ev.result)
-    assert "早点睡吧。" in "".join(texts(ev.result))
+def test_broken_wav_is_rejected(tmp_path):
+    from conftest import load_mod
+
+    mod = load_mod()
+    bad = tmp_path / "bad.wav"
+    bad.write_bytes(b"RIFF" + b"\x00" * 4000)
+    ok, why = mod._audio_ok(str(bad))
+    assert not ok
+    assert "WAV" in why, why
 
 
-def test_valid_audio_replaces_text(tmp_path):
-    p, _ = make_plugin(tmp_path, max_chars_user=2000)
-    good = tmp_path / "good.wav"
-    _make_wav(good)
-    p.context = FakeContext(FakeProvider(path=str(good)))
-    ev = Event(text="念给我听", reply="早点睡吧。")
-    asyncio.run(p.maybe_tts(ev))
-    assert _voiced(ev.result)
+def test_directory_is_rejected(tmp_path):
+    from conftest import load_mod
+
+    mod = load_mod()
+    ok, why = mod._audio_ok(str(tmp_path))
+    assert not ok
+    assert why
+
+
+def test_non_wav_non_empty_is_accepted(tmp_path):
+    """mp3/silk 这类我们没法解析的格式，非空就交给宿主去发。"""
+    from conftest import load_mod
+
+    mod = load_mod()
+    mp3 = tmp_path / "a.mp3"
+    mp3.write_bytes(b"ID3" + b"\x00" * 200)
+    ok, why = mod._audio_ok(str(mp3))
+    assert ok, why
+
+
+def test_none_is_rejected():
+    from conftest import load_mod
+
+    mod = load_mod()
+    ok, why = mod._audio_ok(None)
+    assert not ok
+    assert why

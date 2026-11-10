@@ -1,8 +1,10 @@
-"""共享的测试夹具：加载插件、造假事件/假 provider。"""
+"""共享的测试夹具：加载插件、造假事件/假 provider。
+
+3.0 之后插件只剩一个工具，夹具也跟着变小：没有偏好、没有轮次、没有清洗正则。
+"""
 
 import importlib.util
 import os
-import re
 import sys
 import tempfile
 import wave
@@ -39,38 +41,14 @@ def load_mod():
     return mod
 
 
-def make_plugin(tmp_path=None, **attrs):
+def make_plugin(**cfg):
+    """造一个插件实例：只初始化工具真正会碰到的状态。"""
     mod = load_mod()
     p = object.__new__(mod.TTSForcePlugin)
-    p.config = dict(attrs)
-    p._last_voice_at = {}
-    p._last_auto_at = {}
+    p.config = dict(cfg)
     p._busy = set()
-    p._prefs = {}
-    p._prefs_loaded = True
-    p._pref_ver = {}
-    p._turn_seq = {}
-    p._last_test_at = {}
     p.context = None
-    pats = p._cfg_list("strip_patterns", mod.DEFAULT_STRIP)
-    p._strip_res = [re.compile(x) for x in pats]
-    if tmp_path is not None:
-        p._pref_file = lambda: Path(tmp_path) / "prefs.json"
-        p._state_file = lambda: Path(tmp_path) / "state.json"  # 别写线上 data
     return p, mod
-
-
-class FakeResult:
-    def __init__(self, text):
-        from astrbot.api.message_components import Plain
-
-        self.chain = [Plain(text=text)]
-
-    def is_llm_result(self):
-        return True
-
-
-UNSET = object()
 
 
 def make_wav(path, seconds=0.2):
@@ -85,17 +63,21 @@ def make_wav(path, seconds=0.2):
     return path
 
 
-class FakeProvider:
-    """result=UNSET 正常返回路径；result=None 模拟合成失败。"""
+UNSET = object()
 
-    def __init__(self, path=None, delay=0.0, result=UNSET, auto_create=True):
+
+class FakeProvider:
+    """result=UNSET 正常返回路径；result=None 模拟合成失败；error=异常对象 模拟抛错。"""
+
+    def __init__(self, path=None, delay=0.0, result=UNSET, auto_create=True, error=None):
         if path is None:
             path = str(make_wav(Path(tempfile.mkdtemp(prefix="ttsfake_")) / "fake.wav"))
         elif auto_create and result is UNSET and not Path(str(path)).exists():
-            make_wav(path)   # 少写点样板：给个路径就自动补一个合法 wav
+            make_wav(path)  # 少写点样板：给个路径就自动补一个合法 wav
         self.path = str(path)
         self.delay = delay
         self.calls = []
+        self.error = error
         self._result = result
 
     async def get_audio(self, text):
@@ -104,17 +86,29 @@ class FakeProvider:
         self.calls.append(text)
         if self.delay:
             await asyncio.sleep(self.delay)
+        if self.error is not None:
+            raise self.error
         return self.path if self._result is UNSET else self._result
 
 
 class FakeContext:
-    def __init__(self, provider):
+    """provider：按 id 查或按会话取，默认都返回它；by_id 只影响按 id 那条路。"""
+
+    def __init__(self, provider=None, by_id=None, session_error=None):
         self._provider = provider
+        self._by_id = by_id
+        self._session_error = session_error
+        self.asked_ids = []
 
     def get_provider_by_id(self, pid):
+        self.asked_ids.append(pid)
+        if self._by_id is not None:
+            return self._by_id
         return self._provider
 
     async def get_using_tts_provider_async(self, umo):
+        if self._session_error is not None:
+            raise self._session_error
         return self._provider
 
 
@@ -136,18 +130,25 @@ class FakeChainResult:
 class Event:
     """够用的假事件：只实现插件会碰到的方法。"""
 
-    def __init__(self, text="", reply="", gid="", umo="bot_a:FriendMessage:110001",
-                 sender="110001", admin=False):
-        self.message_str = text
+    def __init__(
+        self,
+        gid="",
+        umo="bot_a:FriendMessage:110001",
+        sender="110001",
+        admin=False,
+        send_error=None,
+    ):
+        self.message_str = ""
         self.unified_msg_origin = umo
         self._gid = gid
         self._sender = sender
         self._admin = admin
         self._extras = {}
-        self.sent = []
-        self.sent_chain = []   # chain_result 发出去的东西（自检命令回音频用）
-        self.result = FakeResult(reply)
+        self._send_error = send_error
+        self.sent_chains = []  # event.send() 发出去的消息链
+        self.sent_results = []  # 命令返回值
 
+    # --- 事件接口 ---
     def get_group_id(self):
         return self._gid
 
@@ -165,36 +166,48 @@ class Event:
     def set_extra(self, key, value):
         self._extras[key] = value
 
-    def get_result(self):
-        return self.result
-
-    def set_result(self, result):
-        self.result = result
+    async def send(self, message):
+        if self._send_error is not None:
+            raise self._send_error
+        self.sent_chains.append(message)
 
     def plain_result(self, text):
-        """命令返回值：记下来方便断言。"""
-        self.sent.append(text)
+        self.sent_results.append(text)
         return text
 
     def chain_result(self, chain):
-        self.sent_chain.append(chain)
+        self.sent_results.append(chain)
         return FakeChainResult(chain)
 
 
-def run(p, event, provider=None):
-    """跑一遍 maybe_tts，返回 (是否发了语音, provider 被念的内容)。"""
-    import asyncio
-
-    prov = provider or FakeProvider()
-    p.context = FakeContext(prov)
-    asyncio.run(p.maybe_tts(event))
+def audio_files(event: Event) -> list[str]:
+    """event.send() 发出的语音文件列表。"""
     from astrbot.api.message_components import Record
 
-    voiced = any(isinstance(c, Record) for c in event.result.chain)
-    return voiced, prov.calls
+    out = []
+    for chain in event.sent_chains:
+        for comp in getattr(chain, "chain", chain):
+            if isinstance(comp, Record):
+                out.append(comp.file)
+    return out
 
 
-def texts(result):
+def sent_text(event: Event) -> str:
+    """event.send() 发出的文字（拼起来）。"""
     from astrbot.api.message_components import Plain
 
-    return [c.text for c in result.chain if isinstance(c, Plain)]
+    parts = []
+    for chain in event.sent_chains:
+        for comp in getattr(chain, "chain", chain):
+            if isinstance(comp, Plain):
+                parts.append(comp.text or "")
+    return "".join(parts)
+
+
+def call_tool(p, event, provider=None, text="晚安，早点睡。"):
+    """调用一次工具，返回模型看到的工具结果字符串。"""
+    import asyncio
+
+    if provider is not None:
+        p.context = FakeContext(provider)
+    return asyncio.run(p.tool_send_voice(event, text))
