@@ -10,7 +10,10 @@ desc: >-
   音频校验（不存在/空/被截断的 WAV 都不发）、同会话不并发合成（工具与 `/语音测试` 共用一条流程）、
   错误脱敏后回给模型；指定的提供商失效会直接报配置错误，不会改用其他服务。
   `/语音测试` 可绕开模型直接合成一句，用来验证语音服务和发送链路。
-version: 3.3.0
+version: 3.3.1
 author: Ray
 repo: https://github.com/Blue-radish/astrbot_plugin_tts_force
 astrbot_version: ">=4.28.1"
+# 语音用 Record 组件发，OneBot v11 才收
+support_platforms:
+  - aiocqhttp

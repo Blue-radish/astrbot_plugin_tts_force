@@ -51,7 +51,7 @@ class Spoken:
     "Ray",
     "模型决定这句话用语音说，插件负责合成并可靠地发出去。"
     "闲聊、问候、情绪表达适合简短语音；技术讨论和要复制的内容用文字。",
-    "3.3.0",
+    "3.3.1",
 )
 class TTSForcePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
